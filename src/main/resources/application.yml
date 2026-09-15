@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: srm-credit-engine
+
+server:
+  port: 8080
+
+credit-engine:
+  pricing:
+    # Decimais, nao percentuais: 0.01 = 1,00% a.m. (mesma premissa dos golden cases)
+    base-monthly-rate: 0.01
+    duplicata-monthly-spread: 0.015
+    cheque-monthly-spread: 0.025
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized

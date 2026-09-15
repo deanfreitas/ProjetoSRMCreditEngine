@@ -28,6 +28,10 @@ services:
       DB_URL: jdbc:postgresql://db:5432/srm_credit_engine
       DB_USERNAME: srm
       DB_PASSWORD: srm
+      # Provedor externo de cotacao (mockado) ligado apenas neste ambiente de
+      # demonstracao: e ele que permite ver timeout, retry e disjuntor em acao sem
+      # precisar cadastrar cotacao na mao.
+      CREDIT_ENGINE_FX_UPSTREAM_ENABLED: "true"
     ports:
       - "8080:8080"
     healthcheck:

@@ -44,6 +44,31 @@ credit-engine:
   fx:
     # Cotacao mais velha que isso nao liquida: falha com 503 em vez de usar taxa defasada.
     max-staleness: 12h
+    upstream:
+      # Provedor externo mockado. Nasce desligado de proposito: mock que sobe sozinho
+      # acaba precificando operacao real. O compose liga via
+      # CREDIT_ENGINE_FX_UPSTREAM_ENABLED=true.
+      enabled: ${CREDIT_ENGINE_FX_UPSTREAM_ENABLED:false}
+      # Latencia e instabilidade simuladas: e o que torna timeout, retry e disjuntor
+      # demonstraveis sem depender de rede real.
+      latency: 80ms
+      failure-rate: 0
+      quote-currency: BRL
+      source: MOCK_UPSTREAM
+      rates:
+        USD: 5.4321
+    resilience:
+      # Teto por tentativa. A liquidacao tem transacao aberta enquanto espera: provedor
+      # lento sem timeout vira contencao no pool de conexoes.
+      call-timeout: 800ms
+      max-attempts: 3
+      retry-backoff: 100ms
+      sliding-window-size: 10
+      minimum-number-of-calls: 5
+      failure-rate-threshold: 50
+      wait-duration-in-open-state: 30s
+      permitted-calls-in-half-open-state: 2
+      max-concurrent-calls: 8
 
 management:
   endpoints:

@@ -30,6 +30,7 @@ Variáveis injetadas no serviço `app` (ver `docker-compose.yml`):
 | `DB_URL`       | `jdbc:postgresql://db:5432/srm_credit_engine`          |
 | `DB_USERNAME`  | `srm`                                                  |
 | `DB_PASSWORD`  | `srm`                                                  |
+| `CREDIT_ENGINE_FX_UPSTREAM_ENABLED` | `true` (liga o provedor externo mockado de cotação) |
 
 #### (b) App local + Postgres do Compose
 
@@ -58,7 +59,15 @@ mvn spring-boot:run
 mvn test
 ```
 
-A suíte tem **70 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui.
+A suíte tem **84 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui.
+
+#### (d) Lint
+
+```bash
+mvn -B checkstyle:check
+```
+
+O `maven-checkstyle-plugin` também está amarrado à fase `validate` do build (`config/checkstyle/checkstyle.xml`), então `mvn test` / `mvn verify` já falham no lint antes de compilar e gastar tempo de teste.
 
 ---
 
@@ -135,6 +144,8 @@ Documentação interativa: Swagger UI e `/v3/api-docs` (springdoc).
 | **Flyway** | Schema versionado junto do código; a primeira migração já carrega as invariantes de negócio. |
 | **Testcontainers** | Mesmo dialeto e locking da produção. H2 esconderia exatamente as falhas que o desafio pune. |
 | **springdoc-openapi** | Contrato HTTP gerado do código — não envelhece separado da implementação. |
+| **resilience4j (módulos programáticos)** | Timeout, retry e disjuntor compostos à mão em `FxConfiguration`, sem starter/AOP: a ordem dos guarda-corpos fica escrita e testável, não implícita na precedência dos aspectos. |
+| **Checkstyle no build** | Regras que sustentam as afirmações do `REVIEW.md` viram gate automático na fase `validate`, não boa intenção em code review. |
 
 Detalhes de premissa (prazo 30/360, taxa base configurável, HALF_EVEN, etc.) → [`SPEC.md`](SPEC.md).
 
@@ -149,7 +160,7 @@ Pacote base: `br.com.srm.creditengine`.
 | `api` | Controllers REST, `ApiExceptionHandler` (RFC 9457 / `problem+json`), DTOs de fronteira (`dto`). |
 | `application` | Casos de uso: `assignor`, `receivable`, `pricing`, `settlement`, `statement`, `fx`. Orquestra domínio + portas. |
 | `domain` | Núcleo sem anotação de framework: `money`, `pricing` (Strategy + motor), `fx`, `receivable`, `settlement`, `assignor`. Regras, value objects, exceções de domínio. |
-| `infrastructure` | Adaptadores: `persistence` (JDBC) e `fx` (`StoredFxRateProvider`). |
+| `infrastructure` | Adaptadores: `persistence` (JDBC) e `fx` (`StoredFxRateProvider`, `ResilientFxRateProvider`, `ExternalFxRateSource` / `MockExternalFxRateSource`, `TransactionalFxRateWriter`, `FxUpstreamHealthIndicator`). |
 | `config` | Beans de pricing/FX, OpenAPI, propriedades (`credit-engine.*`). |
 
 O **domínio não depende de Spring/JPA**. O extrato (`SettlementStatementController` → `SettlementStatementQuery` / `JdbcSettlementStatementQuery`) **atalha da API direto para a porta de leitura em SQL nativo** — autorizado no item **4.1.7** do enunciado; inventar um service que só repassa a chamada seria camada vazia.
@@ -166,6 +177,36 @@ Resumo; a defesa completa está no `SPEC.md` (§2 e §4).
 - **API**: quantias como **string** decimal nos DTOs (`MoneyView.amount`, `faceValue`, `rate`) — JSON number em JavaScript vira double e perde centavo.
 - **`FxRate`**: direção explícita — *1 unidade de `baseCurrency` = `rate` unidades de `quoteCurrency`* (C3: USD/BRL 5,4321). Conversão tipada; inverter cotação é o erro clássico do Anexo A.
 - **Cotação na liquidação**: resolvida **uma vez**, **congelada** no registro de auditoria (par, valor, `effectiveAt`, fonte). Cotação ausente ou defasada (`credit-engine.fx.max-staleness`, default 12h) → **503** (`FX_RATE_UNAVAILABLE`), sem fallback 1:1 ou taxa inventada. Simulação e liquidação **não compartilham** snapshot: cada uma lê a vigente no seu instante.
+
+---
+
+### Resiliência do câmbio
+
+O provedor externo de cotação (aqui `MockExternalFxRateSource`, com latência e instabilidade configuráveis) é tratado como terceiro de verdade: pode demorar, cair ou simplesmente não cotar o par pedido.
+
+**Porta com dois modos de "não deu"** (`ExternalFxRateSource`): `Optional.empty()` = o terceiro respondeu e não cota esse par (resposta válida — não gera retry nem conta para o disjuntor); `FxRateSourceException` = falha técnica (timeout, 5xx, conexão), que conta para os dois. Tratar as duas igual levaria a retentar uma pergunta cuja resposta não muda e a abrir o disjuntor por par mal configurado. O mock **não inventa** cotação de par desconhecido e **não inverte** a taxa por conta própria (defeito clássico do Anexo A).
+
+**Caminho rápido é o banco** (`ResilientFxRateProvider`): havendo cotação vigente e fresca no histórico, o terceiro não é consultado — e é essa a razão de o disjuntor aberto **não** derrubar a operação. Quando não há taxa utilizável, a consulta externa sai com três guarda-corpos compostos **disjuntor por fora, retry no meio, timeout por dentro**:
+
+| Guarda-corpo | Por quê |
+|--------------|---------|
+| **Timeout por tentativa** (`call-timeout`, 800ms) | A thread da liquidação segura a transação aberta enquanto espera; provedor lento sem timeout vira contenção no pool de conexões. |
+| **Retry com backoff** (`max-attempts` 3, `retry-backoff` 100ms) | Falha de um pacote não vira erro de negócio. Retry aqui é seguro porque é consulta: não muda estado de ninguém. |
+| **Disjuntor** (`fx-upstream`: janela 10, mínimo 5 chamadas, 50% de falha, 30s aberto, 2 chamadas em half-open) | Com o terceiro fora do ar, para de tentar e falha rápido; sem ele cada requisição pagaria o timeout inteiro e a fila de entrada estouraria por um sistema que não é nosso. |
+
+A ordem importa: assim uma requisição conta como **uma** observação no disjuntor (não três, o que abriria o circuito em uma única requisição ruim) e o teto de tempo vale por tentativa. Saturação do pool dedicado (`RejectedExecutionException`) é ignorada pelo disjuntor e pelo retry — capacidade nossa não é falha do terceiro.
+
+**Validação do que o terceiro responde**: par trocado, vigência no futuro e cotação defasada são recusados. Há tolerância de **5s de skew de relógio** (`CLOCK_SKEW_TOLERANCE`) porque a vigência devolvida é naturalmente alguns milissegundos posterior à consulta e os relógios não estão sincronizados; com folga grande, taxa agendada para o futuro entraria como se fosse de agora.
+
+**Não existe plano B com taxa velha.** Taxa defasada em dia de volatilidade não é degradação graciosa, é prejuízo silencioso: a liquidação falha com **503** (`FX_RATE_UNAVAILABLE`) e o operador decide.
+
+**Escrita em transação própria** (`TransactionalFxRateWriter`, `REQUIRES_NEW`): a busca acontece dentro da transação da liquidação; se gravasse junto e a liquidação fosse desfeita (optimistic locking perdido), a cotação desapareceria e a próxima tentativa bateria no terceiro outra vez, no meio de um pico. Colisão de chave única (par + vigência) **não é erro** — outra instância gravou a mesma cotação primeiro, e o histórico é append-only.
+
+**Health** (`FxUpstreamHealthIndicator`): disjuntor aberto responde **`DEGRADED`**, não `DOWN`. Liquidação em moeda única e cross-currency com taxa fresca continuam funcionando; marcar a aplicação como fora do ar faria o orquestrador reiniciar ou tirar do balanceador uma instância saudável, transformando problema de terceiro em indisponibilidade própria.
+
+**Composição programática** (`FxConfiguration`), com os módulos `resilience4j-circuitbreaker` / `-retry` / `-timelimiter` / `-micrometer` — **sem starter e sem AOP**: com anotação, a ordem dos aspectos fica implícita no framework e "por que o disjuntor abriu em uma única requisição" vira arqueologia. Métricas do disjuntor vão para o Micrometer via `TaggedCircuitBreakerMetrics`. O pool é **dedicado e sem fila** (`SynchronousQueue`, `AbortPolicy`, `max-concurrent-calls` 8): quando o terceiro fica lento, a rejeição aparece rápido em vez de acumular requisições esperando.
+
+**O mock nasce desligado** (`credit-engine.fx.upstream.enabled` default `false`, junto de `credit-engine.fx.resilience` em `application.yml`) — decisão consciente: mock que sobe sozinho acaba precificando operação real. O `docker-compose.yml` liga explicitamente no ambiente de demonstração via `CREDIT_ENGINE_FX_UPSTREAM_ENABLED=true`. Desligado, `fxRateProvider` é apenas o histórico do banco (`StoredFxRateProvider`).
 
 ---
 
@@ -215,8 +256,10 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 
 - `credit_engine.settlements{result}` — contador com `result` ∈ `created` \| `replayed` \| `idempotency_conflict` \| `concurrent_conflict`
 - `credit_engine.pricing.duration` — timer do motor (simulação e liquidação)
+- `credit_engine.fx.lookups{outcome}` — contador de resolução de cotação com `outcome` ∈ `stored` \| `refreshed` \| `circuit_open` \| `rejected` \| `upstream_failed` \| `pair_unknown`: separa "servido pelo histórico" de "buscado no terceiro", e distingue disjuntor aberto, pool saturado, falha técnica e par não cotado
+- `resilience4j_circuitbreaker_*` — estado, chamadas e taxa de falha do disjuntor `fx-upstream` (via `TaggedCircuitBreakerMetrics`): em incidente, a primeira pergunta é "o disjuntor está aberto?"
 
-**Actuator** (`application.yml`): expostos `health`, `info`, `metrics`, `prometheus`.
+**Actuator** (`application.yml`): expostos `health`, `info`, `metrics`, `prometheus`. Com o provedor externo ligado, o `FxUpstreamHealthIndicator` publica em `/actuator/health` o nome do disjuntor, o estado e as contagens de chamadas bufferizadas/falhas.
 
 Logs de liquidação trazem `settlementId`, `receivableId`, `idempotencyKey`, valores e taxa — o bastante para distinguir created vs replay vs conflito no plantão.
 
@@ -224,7 +267,7 @@ Logs de liquidação trazem `settlementId`, `receivableId`, `idempotencyKey`, va
 
 ### Testes / evidência
 
-**70 invocações** no total (`mvn test`). Por classe:
+**84 invocações** no total (`mvn test`). Por classe:
 
 | Classe | # | O que prova |
 |--------|---|-------------|
@@ -236,8 +279,31 @@ Logs de liquidação trazem `settlementId`, `receivableId`, `idempotencyKey`, va
 | `SettlementStatementQueryIntegrationTest` | 8 | filtros (período, cedente, moeda), paginação, totais no banco, página abusiva |
 | `CreditEngineApiIntegrationTest` | 8 | fluxo HTTP completo C3, 2ª liquidação 409, FX ausente 503, OpenAPI exposto |
 | `SettlementControllerTest` | 10 | contrato HTTP de status (201/200/400/404/409/503) com handler real |
+| `ResilientFxRateProviderTest` | 12 | sem Spring e sem banco: caminho rápido sem tocar no terceiro, timeout cortando a espera, retry cobrindo falha passageira, disjuntor abrindo e falhando rápido sem bater no provedor, disjuntor aberto **não** bloqueando quando há taxa fresca em casa, recuperação em half-open, par desconhecido sem retry nem disjuntor, e recusa de taxa de par trocado / vigência futura / defasada, além da tolerância de skew |
+| `FxUpstreamRefreshIntegrationTest` | 2 | em PostgreSQL real: cotação trazida do provedor entra no histórico e a segunda consulta é servida pelo histórico; liquidação cross-currency reproduz o golden case C3 (`US$ 17.094,67`) usando a taxa do provedor e a congela na auditoria |
 
 Integração = PostgreSQL real via Testcontainers + schema Flyway.
+
+---
+
+### CI e linter
+
+`.github/workflows/ci.yml` roda em push e PR para `main`, com `concurrency` cancelando execuções anteriores da mesma ref (PR com vários pushes não faz fila de build obsoleto). Dois jobs em `ubuntu-latest`:
+
+| Job | O que faz |
+|-----|-----------|
+| `lint` | `mvn -B checkstyle:check` — primeiro gate, rápido; falha aqui não gasta tempo de teste |
+| `test` | `mvn -B verify` após o lint (`needs: lint`); `target/surefire-reports` sai como artefato mesmo em falha (`if: always()`) |
+
+O runner tem **Docker nativo**, então **não há `services:` de Postgres**: o Testcontainers sobe o banco — o mesmo caminho da máquina do desenvolvedor, sem um segundo jeito de subir schema só para a CI. JDK 21 Temurin com `cache: maven`.
+
+O linter (`config/checkstyle/checkstyle.xml`, ligado ao `pom.xml` na fase `validate`, somente código de produção) existe para transformar em gate as regras que este domínio exige:
+
+- **`catch` vazio banido** (`EmptyCatchBlock`, sem exceção por comentário) — é exatamente o defeito do Anexo A: erro engolido em caminho de dinheiro.
+- **`float`/`double` proibidos** — dinheiro não cabe em binário; o teto é `BigDecimal`.
+- **Construtor de `BigDecimal` com literal numérico proibido** — `new BigDecimal(0.1)` carrega o erro do `double` para dentro do decimal exato; usa-se `String` ou `Money.of()`.
+- **`IllegalCatch` para `Throwable` e `RuntimeException`** — captura genérica esconde bug de lógica. `java.lang.Exception` fica fora da lista de propósito: é capturada no limite com o mundo externo (`ResilientFxRateProvider`, em volta do `Callable`), onde não é engolida e sim traduzida em exceção de domínio com causa.
+- **Teto de 140 colunas, sem arquivo de supressão** — 140 (e não 120) porque assinatura de construtor de record e SQL nomeado passam disso sem prejudicar leitura; sem supressão porque regra com exceção por pacote perde autoridade e vira ruído que o time aprende a ignorar.
 
 ---
 
@@ -256,9 +322,7 @@ Contexto: um autor, prazo curto, defesa ao vivo em cima do histórico — não t
 
 Corte deliberado para caber no esforço e na barra sênior do caminho de dinheiro. Quando existir, o detalhe de cada corte vai em `DECISIONS.md`.
 
-- **Resiliência do provedor de câmbio mockado**: timeout / retry / circuit breaker na integração externa. Hoje a falha é explícita (503 + rollback); falta o envelope de resiliência do cliente HTTP.
-- **CI (GitHub Actions)** rodando `mvn test` e gates básicos.
-- **Diagrama C4** (context + container).
+- **Diagrama C4** (níveis 1-2: context + container).
 - **`DECISIONS.md`** e **`AI_USAGE.md`** (exigidos pelo enunciado §7 e §10) — ainda não versionados.
 - **`REVIEW.md` já existe** (code review reverso do Anexo A, amarrado às correções deste repositório).
 - Frontend do painel/grid (fora do escopo desta entrega backend).
@@ -274,3 +338,5 @@ Corte deliberado para caber no esforço e na barra sênior do caminho de dinheir
 | `desafio-tecnico-srm-credit-engine-v2 (3).md` | Enunciado |
 | `src/main/resources/db/migration/V1__initial_schema.sql` | Invariantes no banco |
 | `docker-compose.yml` / `Dockerfile` | Runtime local e imagem |
+| `.github/workflows/ci.yml` | Pipeline de lint e testes |
+| `config/checkstyle/checkstyle.xml` | Regras do linter ligadas ao build |

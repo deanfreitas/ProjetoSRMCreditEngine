@@ -39,7 +39,9 @@ public class SimulationController {
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Precificacao calculada"),
             @ApiResponse(responseCode = "400", description = "Payload invalido", content = @Content),
-            @ApiResponse(responseCode = "422", description = "Entrada sem sentido financeiro (face nao positiva, vencimento anterior)", content = @Content),
+            @ApiResponse(responseCode = "422",
+                    description = "Entrada sem sentido financeiro (face nao positiva, vencimento anterior)",
+                    content = @Content),
             @ApiResponse(responseCode = "503", description = "Sem cotacao vigente para o par pedido", content = @Content)
     })
     public PricingView simulate(@Valid @RequestBody SimulationRequest request) {

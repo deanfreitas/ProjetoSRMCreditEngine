@@ -17,9 +17,23 @@ spring:
     # string, porque JSON number lido em JavaScript vira double e perde centavo.
     generator:
       write-bigdecimal-as-plain: true
+    default-property-inclusion: non_null
+  mvc:
+    problemdetails:
+      # Erro de framework (405, 415, rota inexistente) tambem sai como problem+json,
+      # no mesmo formato do ApiExceptionHandler.
+      enabled: true
 
 server:
   port: 8080
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
 
 credit-engine:
   pricing:

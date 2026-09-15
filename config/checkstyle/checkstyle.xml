@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+          "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+          "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<module name="Checker">
+    <!-- Arquivo Checkstyle para o projeto SRM Credit Engine -->
+    <!-- Comentarios sem acentuacao conforme convencao do projeto -->
+
+    <property name="severity" value="error"/>
+    <property name="fileExtensions" value="java"/>
+
+    <!-- Proibe o uso de caracteres TAB para garantir indentacao consistente -->
+    <module name="FileTabCharacter">
+        <property name="eachLine" value="true"/>
+    </module>
+
+    <!-- Limite de linha unico para todo o projeto, sem arquivo de supressao: lint com
+         excecao por pacote perde autoridade e vira ruido que o time aprende a ignorar.
+         O teto e 140 (e nao 120) porque assinaturas de construtor de record e SQL
+         nomeado passam disso sem prejuizo de leitura; import e URL nao contam. -->
+    <module name="LineLength">
+        <property name="max" value="140"/>
+        <property name="ignorePattern" value="^package.*|^import.*|https?://"/>
+    </module>
+
+    <module name="TreeWalker">
+
+        <!-- Bloco catch vazio esconde erros e dificulta o debug -->
+        <!-- Sem exencao por comentario para evitar o defeito do Anexo A -->
+        <module name="EmptyCatchBlock">
+            <property name="commentFormat" value="^$"/>
+        </module>
+
+        <!-- Proibe a captura de excecoes genericas para nao esconder bugs de logica.
+             java.lang.Exception fica fora da lista porque e capturada legitimamente no
+             limite com o mundo externo (ResilientFxRateProvider, ao redor de Callable):
+             ali a excecao nao e engolida, e traduzida em excecao de dominio com causa. -->
+        <module name="IllegalCatch">
+            <property name="illegalClassNames" value="java.lang.Throwable, java.lang.RuntimeException"/>
+        </module>
+
+        <!-- Garante o contrato equals/hashCode para uso em colecoes -->
+        <module name="EqualsHashCode"/>
+
+        <!-- Exige caso default em switch para cobrir todos os caminhos -->
+        <module name="MissingSwitchDefault"/>
+
+        <!-- Mantem o codigo limpo removendo importacoes nao utilizadas -->
+        <module name="UnusedImports"/>
+
+        <!-- Remove importacoes redundantes para maior clareza -->
+        <module name="RedundantImport"/>
+
+        <!-- Simplifica expressoes booleanas para melhor leitura -->
+        <module name="SimplifyBooleanExpression"/>
+
+        <!-- Comparacao de Strings deve ser feita com .equals() -->
+        <module name="StringLiteralEquality"/>
+
+        <!-- Evita erros de logica em switch sem break (fall-through) -->
+        <module name="FallThrough"/>
+
+        <!-- Uso obrigatorio de chaves para evitar erros de associacao em blocos -->
+        <module name="NeedBraces"/>
+
+        <!-- Regra para proibir float/double: dinheiro deve usar BigDecimal -->
+        <module name="RegexpSinglelineJava">
+            <property name="format" value="\b(float|double)\b"/>
+            <property name="ignoreComments" value="true"/>
+            <property name="message" value="Nao use float ou double para representar dinheiro. Use BigDecimal para garantir precisao decimal."/>
+        </module>
+
+        <!-- Regra para proibir new BigDecimal(double): use String ou Money.of() -->
+        <module name="RegexpSinglelineJava">
+            <property name="format" value="new\s+BigDecimal\s*\(\s*[\d\.]"/>
+            <property name="ignoreComments" value="true"/>
+            <property name="message" value="Nao use construtor de BigDecimal com literais numericos. Use String ou Money.of() para evitar erro de arredondamento."/>
+        </module>
+
+    </module>
+</module>

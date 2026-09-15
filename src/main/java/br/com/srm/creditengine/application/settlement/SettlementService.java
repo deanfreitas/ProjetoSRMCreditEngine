@@ -117,7 +117,8 @@ public class SettlementService {
             throw new ConcurrentSettlementException(receivable.id(), e);
         }
 
-        log.info("Liquidacao registrada: settlementId={} receivableId={} assignorId={} presentValue={} settlementAmount={} fxRate={} termMonths={}",
+        log.info("Liquidacao registrada: settlementId={} receivableId={} assignorId={} presentValue={} "
+                        + "settlementAmount={} fxRate={} termMonths={}",
                 settlement.id(), settlement.receivableId(), settlement.assignorId(),
                 settlement.presentValue(), settlement.settlementAmount(),
                 settlement.optionalFxRate().map(FxRate::rate).orElse(null),

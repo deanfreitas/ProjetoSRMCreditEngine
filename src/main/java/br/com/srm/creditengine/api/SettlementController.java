@@ -55,11 +55,16 @@ public class SettlementController {
             description = "Atomica e idempotente. A cotacao usada e congelada no registro de auditoria.")
     @ApiResponses({
             @ApiResponse(responseCode = "201", description = "Liquidacao registrada"),
-            @ApiResponse(responseCode = "200", description = "Repeticao da mesma Idempotency-Key: devolve a liquidacao original"),
+            @ApiResponse(responseCode = "200",
+                    description = "Repeticao da mesma Idempotency-Key: devolve a liquidacao original"),
             @ApiResponse(responseCode = "400", description = "Payload invalido ou Idempotency-Key ausente", content = @Content),
             @ApiResponse(responseCode = "404", description = "Recebivel inexistente", content = @Content),
-            @ApiResponse(responseCode = "409", description = "Recebivel ja liquidado, liquidacao concorrente ou chave reusada com outro payload", content = @Content),
-            @ApiResponse(responseCode = "503", description = "Cotacao indisponivel ou defasada: nada foi gravado, pode repetir", content = @Content)
+            @ApiResponse(responseCode = "409",
+                    description = "Recebivel ja liquidado, liquidacao concorrente ou chave reusada com outro payload",
+                    content = @Content),
+            @ApiResponse(responseCode = "503",
+                    description = "Cotacao indisponivel ou defasada: nada foi gravado, pode repetir",
+                    content = @Content)
     })
     public ResponseEntity<SettlementView> settle(
             @RequestHeader("Idempotency-Key")

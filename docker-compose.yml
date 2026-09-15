@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: srm-credit-engine-db
+    environment:
+      POSTGRES_DB: srm_credit_engine
+      POSTGRES_USER: srm
+      POSTGRES_PASSWORD: srm
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # A aplicacao so sobe quando o banco aceita conexao: sem isso o Flyway
+      # falha na primeira tentativa e o container reinicia em loop.
+      test: [ "CMD-SHELL", "pg_isready -U srm -d srm_credit_engine" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    container_name: srm-credit-engine-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/srm_credit_engine
+      DB_USERNAME: srm
+      DB_PASSWORD: srm
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP" ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  db-data:

@@ -1,6 +1,22 @@
 spring:
   application:
     name: srm-credit-engine
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/srm_credit_engine}
+    username: ${DB_USERNAME:srm}
+    password: ${DB_PASSWORD:srm}
+    hikari:
+      # Liquidacao e transacao curta; pool pequeno e explicito evita esconder contencao.
+      maximum-pool-size: 10
+      connection-timeout: 3000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  jackson:
+    # Sem notacao cientifica em BigDecimal. Nos DTOs da API os valores monetarios vao como
+    # string, porque JSON number lido em JavaScript vira double e perde centavo.
+    generator:
+      write-bigdecimal-as-plain: true
 
 server:
   port: 8080
@@ -11,6 +27,9 @@ credit-engine:
     base-monthly-rate: 0.01
     duplicata-monthly-spread: 0.015
     cheque-monthly-spread: 0.025
+  fx:
+    # Cotacao mais velha que isso nao liquida: falha com 503 em vez de usar taxa defasada.
+    max-staleness: 12h
 
 management:
   endpoints:

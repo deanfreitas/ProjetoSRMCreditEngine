@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Log estruturado em JSON, uma linha por evento, na saida padrao.
+
+  Por que JSON e nao texto: o SPEC.md (secao Operacao) cobra correlacao por requisicao e
+  por chave de idempotencia. Texto formatado obriga o plantao a garimpar com expressao
+  regular; JSON com campo nomeado vira filtro no agregador - "me mostre tudo desta
+  requisicao" ou "tudo desta chave de idempotencia" - que e exatamente a pergunta de um
+  incidente de pagamento duplicado.
+
+  Por que stdout e nao arquivo: container nao tem disco que interesse. Quem coleta e
+  rotaciona e a plataforma; aplicacao que escreve arquivo dentro do container ou perde log
+  no restart ou enche o volume.
+
+  O perfil "console" existe para a leitura humana durante desenvolvimento e para a defesa
+  ao vivo: ligar com SPRING_PROFILES_ACTIVE=console. Nos testes vale o logback-test.xml,
+  que tem precedencia e mantem a saida da suite legivel.
+-->
+<configuration>
+
+    <springProfile name="console">
+        <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+        <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="!console">
+        <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <!--
+                  includeMdc e o ponto do arquivo inteiro: correlationId e idempotencyKey
+                  entram como campo proprio, sem ninguem precisar interpolar no texto da
+                  mensagem. O que o CorrelationIdFilter coloca no MDC chega ao agregador.
+                -->
+                <includeMdc>true</includeMdc>
+                <includeContext>false</includeContext>
+                <fieldNames>
+                    <timestamp>timestamp</timestamp>
+                    <message>message</message>
+                    <thread>thread</thread>
+                    <logger>logger</logger>
+                    <levelValue>[ignore]</levelValue>
+                </fieldNames>
+                <customFields>{"application":"srm-credit-engine"}</customFields>
+                <!--
+                  Stack trace enxuta: frame de framework e ruido que empurra a causa raiz
+                  para fora da tela do plantao. O que interessa e o frame do dominio.
+                -->
+                <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                    <maxDepthPerThrowable>25</maxDepthPerThrowable>
+                    <rootCauseFirst>true</rootCauseFirst>
+                    <exclude>^sun\.reflect\..*</exclude>
+                    <exclude>^java\.lang\.reflect\..*</exclude>
+                    <exclude>^org\.springframework\.cglib\..*</exclude>
+                </throwableConverter>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+    </springProfile>
+
+</configuration>

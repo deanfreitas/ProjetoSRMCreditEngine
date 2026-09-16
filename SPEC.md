@@ -89,7 +89,7 @@ sistema. (Um `expectedFxRate` opcional com rejeição por divergência é a evol
 está listado em `DECISIONS.md`.)
 
 **Se o provedor de cotação cair:** a liquidação cross-currency **falha explicitamente**
-(HTTP 503, `MISSING_FX_RATE`/`FX_UNAVAILABLE`), sem fallback para taxa 1:1, taxa antiga
+(HTTP 503, `FX_RATE_UNAVAILABLE`), sem fallback para taxa 1:1, taxa antiga
 arbitrária ou valor default. Liquidar com taxa errada é pior do que não liquidar. Timeout +
 retry com circuit breaker protegem o pico; o estado do recebível só muda dentro da transação
 que obteve a taxa.
@@ -199,7 +199,8 @@ esperados conferidos por cálculo independente, e não pelo próprio motor.
 
 ### Operação
 - Logs estruturados (JSON) com correlação por requisição e chave de idempotência; valores
-  monetários no log, nunca dado sensível de cedente.
+  monetários no log, nunca dado sensível de cedente. *(Entregue: `logback-spring.xml` +
+  `CorrelationIdFilter`.)*
 - Métricas de negócio expostas: contador de liquidações por resultado e latência do motor de
   precificação.
 - Integração de câmbio com timeout e circuit breaker; queda do provedor degrada apenas

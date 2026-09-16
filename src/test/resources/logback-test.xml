@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Na suite o log volta a ser texto legivel: quando um teste de concorrencia falha, quem le
+  a saida e uma pessoa, nao um agregador. Este arquivo tem precedencia sobre o
+  logback-spring.xml da aplicacao, entao o JSON de producao nao polui a saida do build.
+
+  O correlationId aparece no padrao para que o teste de integracao continue mostrando o
+  rastro da requisicao - e para que a ausencia dele seja visivel se o filtro quebrar.
+-->
+<configuration>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%X{correlationId:-}] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="br.com.srm.creditengine" level="INFO"/>
+    <logger name="org.springframework" level="WARN"/>
+    <logger name="org.testcontainers" level="WARN"/>
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>

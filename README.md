@@ -261,13 +261,17 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 
 **Actuator** (`application.yml`): expostos `health`, `info`, `metrics`, `prometheus`. Com o provedor externo ligado, o `FxUpstreamHealthIndicator` publica em `/actuator/health` o nome do disjuntor, o estado e as contagens de chamadas bufferizadas/falhas.
 
-Logs de liquidação trazem `settlementId`, `receivableId`, `idempotencyKey`, valores e taxa — o bastante para distinguir created vs replay vs conflito no plantão.
+**Log estruturado em JSON** (`logback-spring.xml`, uma linha por evento em `stdout`): `CorrelationIdFilter` põe `correlationId` e `idempotencyKey` no MDC, e o encoder os publica como **campo indexável**, não interpolados no texto. As duas perguntas de um incidente de pagamento duplicado viram filtro no agregador: *tudo desta requisição* e *todas as tentativas desta chave*.
+
+- O `X-Correlation-Id` é aceito do chamador (o rastro atravessa a fronteira) e **sempre devolvido na resposta, inclusive em erro** — quem abre ticket com o id em mãos acha a linha exata. Valor fora do formato aceito é descartado e substituído por um gerado em casa: cabeçalho de terceiro com quebra de linha permitiria **forjar linha de log** e contaminar a investigação.
+- Logs de liquidação trazem `settlementId`, `receivableId`, `assignorId`, valores, taxa e prazo — o bastante para distinguir created vs replay vs conflito.
+- Para ler no terminal durante desenvolvimento ou na defesa ao vivo: `SPRING_PROFILES_ACTIVE=console`. Nos testes vale `src/test/resources/logback-test.xml`, que mantém a saída da suíte legível.
 
 ---
 
 ### Testes / evidência
 
-**84 invocações** no total (`mvn test`). Por classe:
+**90 invocações** no total (`mvn test`). Por classe:
 
 | Classe | # | O que prova |
 |--------|---|-------------|
@@ -277,7 +281,8 @@ Logs de liquidação trazem `settlementId`, `receivableId`, `idempotencyKey`, va
 | `MoneyTest` | 4 | soma exata, moedas distintas falham, arredondamento explícito |
 | `SettlementServiceIntegrationTest` | 11 | C1/C3 no banco, replay, chave conflituosa, **8 threads → 1 pagamento**, rollback se FX cai, taxa defasada/futura, **imutabilidade barrada pelo trigger** |
 | `SettlementStatementQueryIntegrationTest` | 8 | filtros (período, cedente, moeda), paginação, totais no banco, página abusiva |
-| `CreditEngineApiIntegrationTest` | 8 | fluxo HTTP completo C3, 2ª liquidação 409, FX ausente 503, OpenAPI exposto |
+| `CreditEngineApiIntegrationTest` | 9 | fluxo HTTP completo C3, 2ª liquidação 409, FX ausente 503, OpenAPI exposto, `X-Correlation-Id` em toda resposta (inclusive 404), fronteira do vencimento "hoje" |
+| `CorrelationIdFilterTest` | 5 | correlação gerada e ecoada no header, id do chamador reaproveitado, chave de idempotência no contexto de log, **header forjado com quebra de linha descartado**, contexto limpo mesmo quando a requisição falha |
 | `SettlementControllerTest` | 10 | contrato HTTP de status (201/200/400/404/409/503) com handler real |
 | `ResilientFxRateProviderTest` | 12 | sem Spring e sem banco: caminho rápido sem tocar no terceiro, timeout cortando a espera, retry cobrindo falha passageira, disjuntor abrindo e falhando rápido sem bater no provedor, disjuntor aberto **não** bloqueando quando há taxa fresca em casa, recuperação em half-open, par desconhecido sem retry nem disjuntor, e recusa de taxa de par trocado / vigência futura / defasada, além da tolerância de skew |
 | `FxUpstreamRefreshIntegrationTest` | 2 | em PostgreSQL real: cotação trazida do provedor entra no histórico e a segunda consulta é servida pelo histórico; liquidação cross-currency reproduz o golden case C3 (`US$ 17.094,67`) usando a taxa do provedor e a congela na auditoria |
@@ -311,7 +316,7 @@ O linter (`config/checkstyle/checkstyle.xml`, ligado ao `pom.xml` na fase `valid
 
 Contexto: um autor, prazo curto, defesa ao vivo em cima do histórico — não time grande com release trains.
 
-- **Branch por fatia vertical**: `feat/pricing-engine` (SPEC + motor + golden cases), `feat/settlement-persistence` (schema JDBC, liquidação, concorrência, API, Docker).
+- **Branch por fatia vertical**: `feat/pricing-engine` (SPEC + motor + golden cases), `feat/settlement-persistence` (schema, adapters JDBC, liquidação atômica, concorrência, Docker), `feat/rest-api-statement` (API, OpenAPI, extrato, `REVIEW.md`), `feat/fx-resilience-ci` (resiliência do câmbio, CI, linter), `docs/architecture-decisions` (C4, `DECISIONS.md`, `AI_USAGE.md`, log estruturado).
 - **Conventional commits**: `docs:`, `feat(pricing):`, `feat(persistence):`, `feat(settlement):`, `chore(docker):` — o *porquê* cabe na mensagem curta e no corpo quando a decisão importa.
 - **Merge `--no-ff` escrito como PR** (ex.: `Merge PR #1: fase 0 (SPEC) e nucleo do motor de precificacao`): preserva o envelope da fatia no grafo sem perder commits atômicos internos.
 - **Por que serve aqui**: na defesa dá para abrir um merge e narrar uma decisão (“por que JDBC”, “por que a ordem idempotência → FX → UPDATE versionado”). Trunk-based puro apagaria essa narrativa; Git Flow completo seria cerimônia sem release/hotfix reais neste desafio.
@@ -320,12 +325,13 @@ Contexto: um autor, prazo curto, defesa ao vivo em cima do histórico — não t
 
 ### O que ainda não está entregue
 
-Corte deliberado para caber no esforço e na barra sênior do caminho de dinheiro. Quando existir, o detalhe de cada corte vai em `DECISIONS.md`.
+Corte deliberado para caber no esforço e na barra sênior do caminho de dinheiro. **Cada corte está justificado em [`DECISIONS.md`](DECISIONS.md)** — com o risco aceito e o gatilho para reverter a decisão:
 
-- **Diagrama C4** (níveis 1-2: context + container).
-- **`DECISIONS.md`** e **`AI_USAGE.md`** (exigidos pelo enunciado §7 e §10) — ainda não versionados.
-- **`REVIEW.md` já existe** (code review reverso do Anexo A, amarrado às correções deste repositório).
-- Frontend do painel/grid (fora do escopo desta entrega backend).
+- **Frontend do painel/grid** (item 4.2 do enunciado) — o contrato que ele consumiria existe, está em OpenAPI e está testado; falta a camada de apresentação.
+- **Autenticação e autorização** — ausência declarada, não disfarçada: é pré-requisito de primeiro deploy, não "endurecimento".
+- **Integração real de cotação** (PTAX/mesa) — o mock vive atrás da porta `ExternalFxRateSource`; o que importa no desenho é o comportamento sob falha, e esse está implementado e testado.
+- **Tracing distribuído, rate limiting e manifests de deploy** — pagam quando existe segundo serviço, identidade de chamador e cluster.
+- **Itens do nível staff** (ADRs formais, design de 1M tx/min, EDA, post-mortem do Anexo B) — explicitamente substitutivos daquele nível, não requisitos do sênior.
 
 ---
 
@@ -334,7 +340,10 @@ Corte deliberado para caber no esforço e na barra sênior do caminho de dinheir
 | Artefato | Uso |
 |----------|-----|
 | [`SPEC.md`](SPEC.md) | Premissas, precisão, critérios de aceite |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | C4 níveis 1-2, fluxo da liquidação e do câmbio fora do ar |
 | [`REVIEW.md`](REVIEW.md) | Review do Anexo A |
+| [`DECISIONS.md`](DECISIONS.md) | O que foi cortado e por quê, com risco aceito |
+| [`AI_USAGE.md`](AI_USAGE.md) | Como a IA foi usada, onde errou e como o processo pegou |
 | `desafio-tecnico-srm-credit-engine-v2 (3).md` | Enunciado |
 | `src/main/resources/db/migration/V1__initial_schema.sql` | Invariantes no banco |
 | `docker-compose.yml` / `Dockerfile` | Runtime local e imagem |

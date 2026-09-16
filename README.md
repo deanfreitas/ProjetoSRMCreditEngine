@@ -12,7 +12,7 @@ Requisitos: **JDK 21**, **Maven 3.9+**, **Docker** (Compose e Testcontainers).
 
 #### (a) Tudo via Docker Compose
 
-Sobe PostgreSQL 16 (healthcheck com `pg_isready`) e a aplicação (imagem multi-stage Java 21). A app só sobe depois do banco saudável.
+Sobe PostgreSQL 16 (healthcheck com `pg_isready`), Redis 7 (`appendonly yes`, healthcheck com `redis-cli ping`) e a aplicação (imagem multi-stage Java 21). A app só sobe depois dos dois saudáveis — mas **não depende do Redis para funcionar**: o guarda de idempotência falha aberto para o PostgreSQL (ver §Idempotência e concorrência).
 
 ```bash
 docker compose up --build
@@ -30,15 +30,20 @@ Variáveis injetadas no serviço `app` (ver `docker-compose.yml`):
 | `DB_URL`       | `jdbc:postgresql://db:5432/srm_credit_engine`          |
 | `DB_USERNAME`  | `srm`                                                  |
 | `DB_PASSWORD`  | `srm`                                                  |
+| `REDIS_HOST` / `REDIS_PORT` | `redis` / `6379` (guarda de idempotência) |
 | `CREDIT_ENGINE_FX_UPSTREAM_ENABLED` | `true` (liga o provedor externo mockado de cotação) |
 
-#### (b) App local + Postgres do Compose
+Para demonstrar o modo degradado, basta `docker compose stop redis`: a liquidação continua correta (a decisão volta para dentro da transação) e `credit_engine.idempotency{result=unavailable}` passa a contar.
+
+#### (b) App local + Postgres e Redis do Compose
 
 ```bash
-docker compose up -d db
+docker compose up -d db redis
 ```
 
-Com o banco em `localhost:5432`, os defaults de `application.yml` bastam (`DB_URL=jdbc:postgresql://localhost:5432/srm_credit_engine`, usuário/senha `srm`). Flyway aplica `V1__initial_schema.sql` na subida.
+Com o banco em `localhost:5432` e o Redis em `localhost:6379`, os defaults de `application.yml` bastam (`DB_URL=jdbc:postgresql://localhost:5432/srm_credit_engine`, usuário/senha `srm`, `REDIS_HOST=localhost`). Flyway aplica `V1__initial_schema.sql` na subida.
+
+Sem Redis local a aplicação sobe e liquida normalmente (degradação por design); para tirar o guarda do caminho de forma explícita, `CREDIT_ENGINE_IDEMPOTENCY_ENABLED=false`.
 
 ```bash
 mvn spring-boot:run
@@ -59,7 +64,7 @@ mvn spring-boot:run
 mvn test
 ```
 
-A suíte tem **84 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui.
+A suíte tem **96 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL` e `Redis`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui; e fake de Redis em memória não provaria `SET NX`, TTL nem script Lua.
 
 #### (d) Lint
 
@@ -141,6 +146,7 @@ Documentação interativa: Swagger UI e `/v3/api-docs` (springdoc).
 | **Java 21 + Spring Boot 3.3** | Tipagem forte, ecossistema maduro para API financeira, `BigDecimal` nativo, validação, Actuator e transações sem reinventar infraestrutura. LTS e tooling previsível na defesa ao vivo. |
 | **Spring Data JPA** | JPA (`@Entity`/`@Table`) para ciclo de vida de agregados e mutações de escrita; consultas analíticas e extratos paginados em JPA/JPQL via `EntityManager` e `@Query` (4.1.6/4.1.7). |
 | **PostgreSQL 16** | `NUMERIC(19,2)` / `NUMERIC(19,6)` exatos, constraints, índices e trigger de imutabilidade. Float/real não entram. |
+| **Redis 7 (Lettuce)** | Guarda de idempotência na borda: `SET NX PX` barra duplo clique e retry **antes** de resolver câmbio, precificar e tomar conexão do pool. Entra como otimização, não como autoridade — a unicidade continua no PostgreSQL. |
 | **Flyway** | Schema versionado junto do código; a primeira migração já carrega as invariantes de negócio. |
 | **Testcontainers** | Mesmo dialeto e locking da produção. H2 esconderia exatamente as falhas que o desafio pune. |
 | **springdoc-openapi** | Contrato HTTP gerado do código — não envelhece separado da implementação. |
@@ -160,8 +166,8 @@ Pacote base: `br.com.srm.creditengine`.
 | `api` | Controllers REST, `ApiExceptionHandler` (RFC 9457 / `problem+json`), DTOs de fronteira (`dto`). |
 | `application` | Casos de uso: `assignor`, `receivable`, `pricing`, `settlement`, `statement`, `fx`. Orquestra domínio + portas. |
 | `domain` | Núcleo sem anotação de framework: `money`, `pricing` (Strategy + motor), `fx`, `receivable`, `settlement`, `assignor`. Regras, value objects, exceções de domínio. |
-| `infrastructure` | Adaptadores: `persistence` (JPA) e `fx` (`StoredFxRateProvider`, `ResilientFxRateProvider`, `ExternalFxRateSource` / `MockExternalFxRateSource`, `TransactionalFxRateWriter`, `FxUpstreamHealthIndicator`). |
-| `config` | Beans de pricing/FX, OpenAPI, propriedades (`credit-engine.*`). |
+| `infrastructure` | Adaptadores: `persistence` (JPA), `fx` (`StoredFxRateProvider`, `ResilientFxRateProvider`, `ExternalFxRateSource` / `MockExternalFxRateSource`, `TransactionalFxRateWriter`, `FxUpstreamHealthIndicator`) e `idempotency` (`RedisIdempotencyStore`, `DisabledIdempotencyStore`). |
+| `config` | Beans de pricing/FX/idempotência, OpenAPI, propriedades (`credit-engine.*`). |
 
 O **domínio não depende de Spring/JPA**. O extrato (`SettlementStatementController` → `SettlementStatementQuery` / `JpaSettlementStatementQuery`) **atalha da API direto para a porta de leitura em JPA** — autorizado no item **4.1.7** do enunciado; inventar um service que só repassa a chamada seria camada vazia.
 
@@ -219,17 +225,28 @@ A ordem importa: assim uma requisição conta como **uma** observação no disju
 | Primeira execução | **201** | liquidação nova, `replayed: false`, header `Location` |
 | Mesma `Idempotency-Key` + mesmo payload | **200** | liquidação original, `replayed: true` |
 | Mesma chave + payload diferente | **409** | `IDEMPOTENCY_KEY_CONFLICT` |
+| Mesma chave + mesmo payload, primeira ainda em execução | **409** | `SETTLEMENT_IN_PROGRESS` (aqui repetir resolve) |
 | Header ausente | **400** | `MISSING_REQUIRED_HEADER` |
 
 `Idempotency-Key` é **obrigatório** (header, máx. 120 chars). A chave é da requisição (retry de rede), não do body.
 
-**Três camadas de defesa** (nesta ordem no `SettlementService`):
+**Quatro camadas de defesa**, nesta ordem:
 
-1. **Regra de domínio / aplicação** — lookup pela chave antes de precificar; fingerprint do pedido; recebível só liquida a partir de `PENDING`.
-2. **Optimistic locking** — `UPDATE receivables SET status='SETTLED', version=version+1 WHERE id=? AND version=? AND status='PENDING'`; zero linhas → `CONCURRENT_SETTLEMENT` (409).
-3. **Unicidade no banco** — `uk_settlements_receivable`, `uk_settlements_idempotency_key`; `DuplicateKeyException` vira conflito e a transação desfaz. Trigger `trg_settlements_immutable` barrando UPDATE/DELETE em `settlements`.
+1. **Guarda em Redis na borda** (`RedisIdempotencyStore`, chamado por `SettlementService` **fora** da transação) — `SET NX PX` reserva a chave em sub-milissegundo. Duplo clique e retry são respondidos aqui, sem resolver cotação, sem precificar e sem tomar conexão do pool. Estado `PROCESSING` (TTL 30s) → `COMPLETED` com o id da liquidação (TTL 24h), escrito **só depois do commit**.
+2. **Regra de domínio / aplicação** (`SettlementTransaction`) — lookup pela chave quando a borda não garantiu (Redis desligado, fora do ar ou registro expirado); fingerprint do pedido; recebível só liquida a partir de `PENDING`.
+3. **Optimistic locking** — `UPDATE receivables SET status='SETTLED', version=version+1 WHERE id=? AND version=? AND status='PENDING'`; zero linhas → `CONCURRENT_SETTLEMENT` (409).
+4. **Unicidade no banco** — `uk_settlements_receivable`, `uk_settlements_idempotency_key`; `DuplicateKeyException` vira conflito e a transação desfaz. Trigger `trg_settlements_immutable` barrando UPDATE/DELETE em `settlements`.
 
-Tudo na **mesma `@Transactional`**: ou marca o recebível e grava a liquidação, ou nada. Teste de corrida: **8 threads**, exatamente **1** pagamento.
+As camadas 2-4 seguem na **mesma `@Transactional`**: ou marca o recebível e grava a liquidação, ou nada. Teste de corrida: **8 threads**, exatamente **1** pagamento.
+
+**Por que o Redis não é a autoridade.** Reserva em Redis e `INSERT` no PostgreSQL são dois sistemas sem commit em duas fases, então o desenho assume isso em vez de fingir o contrário:
+
+- **Falha aberto.** Qualquer erro do Redis degrada para o caminho do banco (`UNAVAILABLE`), nunca para 5xx. Idempotência não pode ser causa de indisponibilidade — por isso o health indicator do Redis está desligado em `application.yml`: Redis fora do ar deixa a aplicação mais lenta, não insalubre.
+- **Reserva compensada no rollback.** Se a transação não commita (503 de câmbio, recebível inelegível, pod morto), a reserva é liberada por script Lua que só apaga se o valor ainda for o desta requisição. Sem isso, o retry legítimo receberia "duplicado" para um pagamento que **nunca aconteceu** — falha silenciosa, pior que indisponibilidade.
+- **Valor de dinheiro nunca sai de cache.** No replay, o Redis diz *quem* é a chave; o corpo da resposta vem de `settlements`. Guarda apontando conclusão que o banco não tem → o banco manda e o caminho completo é refeito.
+- **TTL não reabre risco.** Expirada a janela, o retry cai no caminho do banco e é barrado por `uk_settlements_idempotency_key`.
+
+Tudo isso está coberto em `SettlementIdempotencyRedisIntegrationTest` (Redis real), incluindo o cenário de Redis inacessível.
 
 ---
 
@@ -241,7 +258,7 @@ Tudo na **mesma `@Transactional`**: ou marca o recebível e grava a liquidação
 |--------|----------|-------------------------|
 | **400** | Payload/header inválido, JSON ilegível | `VALIDATION_FAILED`, `MISSING_REQUIRED_HEADER`, `MALFORMED_REQUEST`, `INVALID_PARAMETER` |
 | **404** | Recurso inexistente | `RECEIVABLE_NOT_FOUND`, `ASSIGNOR_NOT_FOUND`, `SETTLEMENT_NOT_FOUND` |
-| **409** | Colisão de estado / corrida / chave reusada | `RECEIVABLE_NOT_SETTLEABLE`, `CONCURRENT_SETTLEMENT`, `IDEMPOTENCY_KEY_CONFLICT`, `ASSIGNOR_ALREADY_REGISTERED`, `FX_RATE_ALREADY_REGISTERED` |
+| **409** | Colisão de estado / corrida / chave reusada ou em voo | `RECEIVABLE_NOT_SETTLEABLE`, `CONCURRENT_SETTLEMENT`, `IDEMPOTENCY_KEY_CONFLICT`, `SETTLEMENT_IN_PROGRESS`, `ASSIGNOR_ALREADY_REGISTERED`, `FX_RATE_ALREADY_REGISTERED` |
 | **422** | Sintaxe ok, sem sentido financeiro | `INVALID_PRICING_INPUT`, `INVALID_ARGUMENT`, `MISSING_FX_RATE`, `FX_RATE_NOT_APPLICABLE` |
 | **503** | Dependência indisponível (câmbio defasado/ausente, persistência) | `FX_RATE_UNAVAILABLE`, `PERSISTENCE_UNAVAILABLE` |
 | **500** | Invariante interna / bug | `INTERNAL_ERROR`, `CURRENCY_MISMATCH`, `UNSUPPORTED_RECEIVABLE_TYPE` |
@@ -254,7 +271,8 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 
 **Métricas de negócio** (Micrometer):
 
-- `credit_engine.settlements{result}` — contador com `result` ∈ `created` \| `replayed` \| `idempotency_conflict` \| `concurrent_conflict`
+- `credit_engine.settlements{result}` — contador com `result` ∈ `created` \| `replayed` \| `idempotency_conflict` \| `concurrent_conflict` \| `in_progress` \| `phantom_completion`
+- `credit_engine.idempotency{store,result}` — contador do guarda com `result` ∈ `acquired` \| `in_progress` \| `replayed` \| `conflict` \| `completed` \| `released` \| `unavailable` \| `vanished` \| `complete_failed` \| `release_failed`: é onde se lê se o Redis está ajudando (`acquired`/`replayed`), se está fora do ar (`unavailable`) ou se reservas estão ficando presas (`release_failed`)
 - `credit_engine.pricing.duration` — timer do motor (simulação e liquidação)
 - `credit_engine.fx.lookups{outcome}` — contador de resolução de cotação com `outcome` ∈ `stored` \| `refreshed` \| `circuit_open` \| `rejected` \| `upstream_failed` \| `pair_unknown`: separa "servido pelo histórico" de "buscado no terceiro", e distingue disjuntor aberto, pool saturado, falha técnica e par não cotado
 - `resilience4j_circuitbreaker_*` — estado, chamadas e taxa de falha do disjuntor `fx-upstream` (via `TaggedCircuitBreakerMetrics`): em incidente, a primeira pergunta é "o disjuntor está aberto?"
@@ -271,7 +289,7 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 
 ### Testes / evidência
 
-**90 invocações** no total (`mvn test`). Por classe:
+**96 invocações** no total (`mvn test`). Por classe:
 
 | Classe | # | O que prova |
 |--------|---|-------------|
@@ -280,6 +298,7 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 | `TermCalculatorTest` | 6 | 30/360, fração arredonda para cima, vencido rejeitado |
 | `MoneyTest` | 4 | soma exata, moedas distintas falham, arredondamento explícito |
 | `SettlementServiceIntegrationTest` | 11 | C1/C3 no banco, replay, chave conflituosa, **8 threads → 1 pagamento**, rollback se FX cai, taxa defasada/futura, **imutabilidade barrada pelo trigger** |
+| `SettlementIdempotencyRedisIntegrationTest` | 6 | com Redis e PostgreSQL reais: conclusão publicada só após o commit e replay a partir dela, gêmea em voo recusada na borda (`SETTLEMENT_IN_PROGRESS`), **reserva compensada no rollback do câmbio** e retry legítimo liquidando depois, chave reusada recusada sem abrir transação, conclusão fantasma perdendo para o banco, e **Redis inacessível não derrubando a liquidação** |
 | `SettlementStatementQueryIntegrationTest` | 8 | filtros (período, cedente, moeda), paginação, totais no banco, página abusiva |
 | `CreditEngineApiIntegrationTest` | 9 | fluxo HTTP completo C3, 2ª liquidação 409, FX ausente 503, OpenAPI exposto, `X-Correlation-Id` em toda resposta (inclusive 404), fronteira do vencimento "hoje" |
 | `CorrelationIdFilterTest` | 5 | correlação gerada e ecoada no header, id do chamador reaproveitado, chave de idempotência no contexto de log, **header forjado com quebra de linha descartado**, contexto limpo mesmo quando a requisição falha |
@@ -287,7 +306,7 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 | `ResilientFxRateProviderTest` | 12 | sem Spring e sem banco: caminho rápido sem tocar no terceiro, timeout cortando a espera, retry cobrindo falha passageira, disjuntor abrindo e falhando rápido sem bater no provedor, disjuntor aberto **não** bloqueando quando há taxa fresca em casa, recuperação em half-open, par desconhecido sem retry nem disjuntor, e recusa de taxa de par trocado / vigência futura / defasada, além da tolerância de skew |
 | `FxUpstreamRefreshIntegrationTest` | 2 | em PostgreSQL real: cotação trazida do provedor entra no histórico e a segunda consulta é servida pelo histórico; liquidação cross-currency reproduz o golden case C3 (`US$ 17.094,67`) usando a taxa do provedor e a congela na auditoria |
 
-Integração = PostgreSQL real via Testcontainers + schema Flyway.
+Integração = PostgreSQL real via Testcontainers + schema Flyway, mais Redis real onde o guarda de idempotência está no caminho.
 
 ---
 

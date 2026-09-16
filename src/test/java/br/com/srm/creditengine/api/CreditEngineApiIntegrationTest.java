@@ -17,6 +17,7 @@ import java.time.LocalDate;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -245,6 +246,19 @@ class CreditEngineApiIntegrationTest extends AbstractIntegrationTest {
                                 """.formatted(assignorId, pastDate)))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.violations.dueDate").exists());
+
+        // Fronteira do "hoje": vencimento no proprio dia e aceito. O teste deriva a data do
+        // mesmo Clock da aplicacao, e o validador usa esse Clock - se a validacao voltar a
+        // perguntar a hora ao fuso do sistema, este par de casos denuncia na virada do dia.
+        String today = LocalDate.ofInstant(clock.instant(), clock.getZone()).toString();
+
+        mockMvc.perform(post("/api/v1/receivables")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"assignorId":"%s","type":"DUPLICATA_MERCANTIL","faceValue":"100000.00",
+                                 "faceCurrency":"BRL","dueDate":"%s"}
+                                """.formatted(assignorId, today)))
+                .andExpect(status().isCreated());
     }
 
     @Test
@@ -301,6 +315,25 @@ class CreditEngineApiIntegrationTest extends AbstractIntegrationTest {
                 .contains("/api/v1/settlements")
                 .contains("/api/v1/settlements/statement")
                 .contains("/api/v1/simulations")
-                .contains("Idempotency-Key");
+                .contains("Idempotency-Key")
+                .contains("X-Correlation-Id");
+    }
+
+    @Test
+    @DisplayName("Toda resposta devolve o id de correlacao, inclusive a que falha")
+    void everyResponseCarriesCorrelationId() throws Exception {
+        // Prova que o filtro esta de fato na cadeia da aplicacao: o teste unitario dele
+        // verifica o comportamento, nao o registro.
+        mockMvc.perform(get("/api/v1/receivables/{id}", "00000000-0000-0000-0000-000000000000"))
+                .andExpect(status().isNotFound())
+                .andExpect(header().exists("X-Correlation-Id"));
+
+        // Id enviado pelo chamador atravessa: o ticket do operador e o log do plantao
+        // passam a ter a mesma chave de busca.
+        mockMvc.perform(get("/api/v1/fx-rates/current")
+                        .param("base", "USD")
+                        .param("quote", "BRL")
+                        .header("X-Correlation-Id", "ticket-4711"))
+                .andExpect(header().string("X-Correlation-Id", "ticket-4711"));
     }
 }

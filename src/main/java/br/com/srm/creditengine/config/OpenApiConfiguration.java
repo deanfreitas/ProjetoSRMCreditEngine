@@ -1,9 +1,13 @@
 package br.com.srm.creditengine.config;
 
+import br.com.srm.creditengine.api.CorrelationIdFilter;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Contact;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.info.License;
+import io.swagger.v3.oas.models.media.StringSchema;
+import io.swagger.v3.oas.models.parameters.HeaderParameter;
+import org.springdoc.core.customizers.OperationCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -39,5 +43,25 @@ public class OpenApiConfiguration {
                         """)
                 .contact(new Contact().name("Mesa de operacoes SRM"))
                 .license(new License().name("Uso interno")));
+    }
+
+    /**
+     * Declara o header de correlacao em todas as operacoes, de uma vez.
+     *
+     * <p>Ele nao pertence a um endpoint: e contrato da API inteira, e repetir anotacao em
+     * cada metodo garantiria que algum ficasse de fora. Documentar importa porque este e o
+     * header que quem integra deve propagar e registrar - sem ele, um pagamento contestado
+     * exige cruzar log por horario, que e o que ninguem consegue fazer sob pressao.
+     */
+    @Bean
+    public OperationCustomizer correlationIdHeader() {
+        return (operation, handlerMethod) -> operation.addParametersItem(new HeaderParameter()
+                .name(CorrelationIdFilter.CORRELATION_ID_HEADER)
+                .description("""
+                        Identificador de correlacao da requisicao. Opcional: se ausente ou fora do formato
+                        aceito, o servidor gera um. Sempre devolvido no header da resposta, inclusive em erro.
+                        """)
+                .required(false)
+                .schema(new StringSchema()));
     }
 }

@@ -127,7 +127,7 @@ curl -sS -D - -X POST "$BASE/api/v1/settlements" \
 
 # 7) Extrato com filtros
 curl -sS "$BASE/api/v1/settlements/statement?assignorId=$ASSIGNOR_ID&currency=USD&page=0&size=20"
-# 200: content com a liquidação, totals do filtro inteiro (não só da página). Prova SQL nativo + paginação server-side.
+# 200: content com a liquidação, totals do filtro inteiro (não só da página). Prova JPA/JPQL + paginação server-side.
 ```
 
 Documentação interativa: Swagger UI e `/v3/api-docs` (springdoc).
@@ -139,7 +139,7 @@ Documentação interativa: Swagger UI e `/v3/api-docs` (springdoc).
 | Escolha | Por quê |
 |---------|---------|
 | **Java 21 + Spring Boot 3.3** | Tipagem forte, ecossistema maduro para API financeira, `BigDecimal` nativo, validação, Actuator e transações sem reinventar infraestrutura. LTS e tooling previsível na defesa ao vivo. |
-| **Spring JDBC (`JdbcClient`), não JPA** | SQL e optimistic locking explícitos (`UPDATE ... WHERE version = ?`). Extrato nasce em SQL nativo com índices — o enunciado (4.1.6/4.1.7) pede isso. Custo: mapeamento manual de rows; aceito de propósito. |
+| **Spring Data JPA** | JPA (`@Entity`/`@Table`) para ciclo de vida de agregados e mutações de escrita; consultas analíticas e extratos paginados em JPA/JPQL via `EntityManager` e `@Query` (4.1.6/4.1.7). |
 | **PostgreSQL 16** | `NUMERIC(19,2)` / `NUMERIC(19,6)` exatos, constraints, índices e trigger de imutabilidade. Float/real não entram. |
 | **Flyway** | Schema versionado junto do código; a primeira migração já carrega as invariantes de negócio. |
 | **Testcontainers** | Mesmo dialeto e locking da produção. H2 esconderia exatamente as falhas que o desafio pune. |
@@ -160,10 +160,10 @@ Pacote base: `br.com.srm.creditengine`.
 | `api` | Controllers REST, `ApiExceptionHandler` (RFC 9457 / `problem+json`), DTOs de fronteira (`dto`). |
 | `application` | Casos de uso: `assignor`, `receivable`, `pricing`, `settlement`, `statement`, `fx`. Orquestra domínio + portas. |
 | `domain` | Núcleo sem anotação de framework: `money`, `pricing` (Strategy + motor), `fx`, `receivable`, `settlement`, `assignor`. Regras, value objects, exceções de domínio. |
-| `infrastructure` | Adaptadores: `persistence` (JDBC) e `fx` (`StoredFxRateProvider`, `ResilientFxRateProvider`, `ExternalFxRateSource` / `MockExternalFxRateSource`, `TransactionalFxRateWriter`, `FxUpstreamHealthIndicator`). |
+| `infrastructure` | Adaptadores: `persistence` (JPA) e `fx` (`StoredFxRateProvider`, `ResilientFxRateProvider`, `ExternalFxRateSource` / `MockExternalFxRateSource`, `TransactionalFxRateWriter`, `FxUpstreamHealthIndicator`). |
 | `config` | Beans de pricing/FX, OpenAPI, propriedades (`credit-engine.*`). |
 
-O **domínio não depende de Spring/JPA**. O extrato (`SettlementStatementController` → `SettlementStatementQuery` / `JdbcSettlementStatementQuery`) **atalha da API direto para a porta de leitura em SQL nativo** — autorizado no item **4.1.7** do enunciado; inventar um service que só repassa a chamada seria camada vazia.
+O **domínio não depende de Spring/JPA**. O extrato (`SettlementStatementController` → `SettlementStatementQuery` / `JpaSettlementStatementQuery`) **atalha da API direto para a porta de leitura em JPA** — autorizado no item **4.1.7** do enunciado; inventar um service que só repassa a chamada seria camada vazia.
 
 ---
 

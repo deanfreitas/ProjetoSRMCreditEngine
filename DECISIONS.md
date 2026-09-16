@@ -17,7 +17,7 @@ Nada aqui é lista de pendência: onde eu cortei, eu digo o que ficou de fora, o
 **Por quê.** O que o painel consumiria já existe, está documentado e está testado:
 
 - simulação sem efeito colateral em `POST /api/v1/simulations` (`SimulationController`), que devolve valor presente, deságio, prazo e as taxas aplicadas — é literalmente o *payload* da "simulação em tempo real";
-- extrato com **paginação server-side de verdade** em `GET /api/v1/settlements/statement` (`SettlementStatementController` → `JdbcSettlementStatementQuery`), com filtro por período, cedente e moeda, `page`/`size`, e totais calculados sobre **o filtro inteiro, não sobre a página** — coberto por `SettlementStatementQueryIntegrationTest` (8 casos, incluindo página abusiva);
+- extrato com **paginação server-side de verdade** em `GET /api/v1/settlements/statement` (`SettlementStatementController` → `JpaSettlementStatementQuery`), com filtro por período, cedente e moeda, `page`/`size`, e totais calculados sobre **o filtro inteiro, não sobre a página** — coberto por `SettlementStatementQueryIntegrationTest` (8 casos, incluindo página abusiva);
 - contrato HTTP publicado em OpenAPI/Swagger UI (springdoc), com o fluxo ponta a ponta verificado em `CreditEngineApiIntegrationTest`.
 
 Ou seja: o contrato que o frontend consumiria não é promessa, é código com teste. O que falta é a camada de apresentação.
@@ -42,17 +42,13 @@ Ou seja: o contrato que o frontend consumiria não é promessa, é código com t
 
 **Risco aceito.** Se a banca estiver avaliando este repositório na barra staff, eu perco os **20%** de "operação e arquitetura" desse nível por falta de documento, mesmo tendo implementação. Assumo esse risco porque o alvo está declarado desde o `SPEC.md` §1.
 
-### 1.3 Spring JDBC em vez de JPA/Hibernate
+### 1.3 Modelo de Persistência: Spring Data JPA para entidades e consultas JPQL
 
-Este não é corte de qualidade — é **troca de custo**, e faço questão de chamar pelo nome.
+Adotamos a padronização completa em Spring Data JPA e JPQL:
 
-**O que eu comprei.** SQL explícito e parametrizado (`JdbcClient`), optimistic locking que se lê como uma linha (`UPDATE receivables SET status='SETTLED', version=version+1 WHERE id=:id AND version=:version AND status='PENDING'` em `JdbcReceivableRepository`), extrato nascendo em SQL nativo com índices dedicados (`ix_settlements_assignor_settled_at`, `ix_settlements_currency_settled_at`) — o que o enunciado pede como diferencial em 4.1.6 — e nenhuma surpresa de *flush*, *dirty checking* ou `LazyInitializationException` no meio de uma transação de pagamento.
+**O que usamos em JPA.** Mapeamento formal de entidades (`@Entity`, `@Table`, `@Id`, `@Version`, `@Column`, `@Enumerated`, `@JdbcTypeCode`) gerenciado via Spring Data JPA para operações de ciclo de vida e persistência de escrita dos agregados (`AssignorJpaEntity`, `ReceivableJpaEntity`, `SettlementJpaEntity`, `FxRateJpaEntity`). Isso elimina o trabalho repetitivo de mapeamento manual de *INSERT*/*UPDATE*, garante versionamento automático e padroniza a gestão transacional.
 
-**O que eu paguei.** Mapeamento manual linha a linha em cinco adaptadores (`JdbcAssignorRepository`, `JdbcFxRateRepository`, `JdbcReceivableRepository`, `JdbcSettlementRepository`, `JdbcSettlementStatementQuery`), sem cache de primeiro nível, sem *lazy loading* e sem `@Version` de graça — a versão é coluna que eu mesmo incremento e confiro pelo número de linhas afetadas. `settlements` tem 21 colunas: o INSERT e o *row mapper* são verbosos por construção.
-
-**Onde isso passa a doer.** Com **4 tabelas e 5 adaptadores** o custo é trivial e o ganho de clareza é alto. O ponto de virada, na minha experiência, é em torno de **8 a 10 agregados** — ou antes, se o mesmo agregado começar a ser projetado em mais de três consultas diferentes (aí o mapeamento manual vira duplicação) ou se aparecerem relacionamentos profundos que hoje não existem (aqui tudo é referência por `UUID`, sem grafo de objetos). Nesse cenário eu introduziria JPA para o CRUD dos agregados e **manteria JDBC para o caminho de liquidação e para os relatórios**, que são justamente onde ORM esconde o que eu preciso ver.
-
-**Risco aceito.** Mais código de infraestrutura para manter e nenhuma proteção automática contra esquecer uma coluna nova no *row mapper*. Mitigação real: os testes de integração rodam contra PostgreSQL de verdade via Testcontainers — H2 não entra, porque dialeto, `NUMERIC` e locking são exatamente o que precisa ser exercitado.
+**Consultas no JPA/JPQL.** As consultas analíticas, extratos e relatórios (`JpaSettlementStatementQuery`) são executadas com JPQL via `EntityManager` e repositórios com `@Query`, aproveitando os índices dedicados (`ix_settlements_assignor_settled_at`, `ix_settlements_currency_settled_at`), executando agregações por moeda e paginação com contagem precisa de forma totalmente integrada à pilha JPA.
 
 ### 1.4 Autenticação e autorização — não existem
 
@@ -175,7 +171,7 @@ Coisas que parecem falta e são decisão. A diferença: eu não mudaria nenhuma 
 - **Nenhum plano B com taxa velha: falha com 503 de propósito.** Sem cotação vigente, ou com cotação além de `credit-engine.fx.max-staleness` (12h), a liquidação cross-currency falha com `FX_RATE_UNAVAILABLE`. Não há *fallback* 1:1, nem "usa a última que tiver". Taxa defasada em dia de volatilidade não é degradação graciosa, é prejuízo silencioso — e prejuízo silencioso é pior que indisponibilidade, porque ninguém é avisado. Quem decide operar com incerteza cambial é a mesa, não o `catch`.
 - **`MockExternalFxRateSource` nasce desligado.** `credit-engine.fx.upstream.enabled` tem default `false`; o `docker-compose.yml` liga explicitamente com `CREDIT_ENGINE_FX_UPSTREAM_ENABLED=true` no ambiente de demonstração. Mock que sobe sozinho acaba precificando operação real — e o default seguro é o que vale quando alguém esquece de configurar. Desligado, o provedor de cotação é só o histórico do banco (`StoredFxRateProvider`).
 - **Imutabilidade de `settlements` no banco, não só na aplicação.** A trigger `trg_settlements_immutable` rejeita UPDATE e DELETE com `restrict_violation`. Não é redundância desconfiada do meu próprio código: é reconhecer que a aplicação não é o único cliente do banco. Script de correção às pressas, rotina de ETL e console de DBA não passam pelo `SettlementService` — passam pela trigger. Está coberta por teste de integração, que é a única forma de provar isso.
-- **O extrato atalha uma camada, de propósito.** `SettlementStatementController` chama direto a porta de leitura (`SettlementStatementQuery` / `JdbcSettlementStatementQuery`), sem service intermediário. Autorizado pelo item 4.1.7 do enunciado, e a alternativa seria um service que só repassa a chamada — camada vazia, anti-padrão da §12. Relatório não tem regra de negócio a orquestrar; tem SQL e índice.
+- **O extrato atalha uma camada, de propósito.** `SettlementStatementController` chama direto a porta de leitura (`SettlementStatementQuery` / `JpaSettlementStatementQuery`), sem service intermediário. Autorizado pelo item 4.1.7 do enunciado, e a alternativa seria um service que só repassa a chamada — camada vazia, anti-padrão da §12. Relatório não tem regra de negócio a orquestrar; tem consulta JPA otimizada e índice.
 
 ---
 

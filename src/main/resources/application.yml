@@ -1,6 +1,16 @@
 spring:
   application:
     name: srm-credit-engine
+  config:
+    import:
+      - optional:aws-secretsmanager:${AWS_SECRETS_NAME:/secret/srm-credit-engine}
+  cloud:
+    aws:
+      region:
+        static: ${AWS_REGION:us-east-1}
+      secretsmanager:
+        enabled: ${AWS_SECRETS_MANAGER_ENABLED:false}
+      endpoint: ${AWS_ENDPOINT_URL:}
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/srm_credit_engine}
     username: ${DB_USERNAME:srm}

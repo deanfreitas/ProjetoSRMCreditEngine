@@ -1,6 +1,6 @@
 # Arquitetura — SRM Credit Engine
 
-Diagrama C4 nos níveis **1 (contexto)** e **2 (containers)**, mais um recorte de componentes e os dois fluxos que sustentam o caminho de dinheiro. Este documento **complementa** o [`README.md`](README.md) (camadas, stack, resiliência do câmbio, contrato de erros, observabilidade) e o [`SPEC.md`](SPEC.md) (premissas de negócio e precisão) — quando a decisão já está defendida lá, aqui fica só o que o desenho mostra e o porquê da forma.
+Diagrama C4 nos níveis **1 (contexto)** e **2 (containers)**, mais o **modelo de dados (ER)**, um recorte de componentes e os dois fluxos que sustentam o caminho de dinheiro. Este documento **complementa** o [`README.md`](README.md) (camadas, stack, resiliência do câmbio, contrato de erros, observabilidade) e o [`SPEC.md`](SPEC.md) (premissas de negócio e precisão) — quando a decisão já está defendida lá, aqui fica só o que o desenho mostra e o porquê da forma.
 
 Todo elemento dos diagramas corresponde a código deste repositório: pacote, classe, tabela, endpoint, métrica ou variável de ambiente. Caixa sem contraparte no código não entrou.
 
@@ -69,6 +69,84 @@ No `docker-compose.yml` são três containers de verdade — `app`, `db` e `redi
 Detalhes dos parâmetros de resiliência (`call-timeout` 800ms, `max-attempts` 3, janela do disjuntor, pool sem fila) estão no `README.md`, seção *Resiliência do câmbio*.
 
 O que atravessa esses containers e não aparece como caixa: o **rastro da requisição**. `CorrelationIdFilter` abre cada requisição com um `correlationId` (aceito do chamador via `X-Correlation-Id` ou gerado) e a `Idempotency-Key` no MDC, e o `logback-spring.xml` os emite como campo do JSON em `stdout`. É o que permite, num incidente, reconstituir uma tentativa de pagamento inteira — a pergunta que o Anexo B faz — sem cruzar log por horário. Com o guarda de idempotência no caminho, esse rastro passou a ser a única forma de distinguir, na mesma chave, quem reservou, quem foi recusado em voo e quem commitou.
+
+---
+
+### Modelo de dados — diagrama ER
+
+Quatro tabelas, criadas por `V1__initial_schema.sql` e aplicadas pelo Flyway na subida. O desenho mostra **as chaves e as restrições que sustentam as invariantes** — o que está aqui é o que o banco garante mesmo com duas instâncias da aplicação no ar ou com alguém rodando SQL na mão.
+
+```mermaid
+erDiagram
+    ASSIGNORS ||--o{ RECEIVABLES : "cede"
+    ASSIGNORS ||--o{ SETTLEMENTS : "recebe pagamento"
+    RECEIVABLES ||--o| SETTLEMENTS : "liquidado exatamente uma vez"
+    FX_RATES }o..o| SETTLEMENTS : "cotacao copiada, nao referenciada"
+
+    ASSIGNORS {
+        uuid id PK
+        varchar document "UK uk_assignors_document, CNPJ/CPF so digitos"
+        varchar legal_name
+        timestamptz created_at
+    }
+
+    RECEIVABLES {
+        uuid id PK
+        uuid assignor_id FK "ix_receivables_assignor"
+        varchar receivable_type "CHECK DUPLICATA_MERCANTIL ou CHEQUE_PRE_DATADO"
+        numeric face_value "19,2 CHECK maior que zero"
+        char face_currency "CHECK BRL ou USD"
+        date due_date
+        varchar status "CHECK PENDING SETTLED CANCELLED"
+        bigint version "optimistic locking"
+        timestamptz created_at
+    }
+
+    FX_RATES {
+        uuid id PK
+        char base_currency "UK do par com effective_at"
+        char quote_currency "CHECK diferente de base_currency"
+        numeric rate "19,6 CHECK maior que zero"
+        timestamptz effective_at "vigencia, indice DESC do par"
+        varchar source
+        timestamptz created_at
+    }
+
+    SETTLEMENTS {
+        uuid id PK
+        uuid receivable_id FK "UK uk_settlements_receivable"
+        uuid assignor_id FK "ix_settlements_assignor_settled_at"
+        varchar idempotency_key "UK uk_settlements_idempotency_key"
+        char request_fingerprint "hash do corpo da requisicao"
+        integer term_months "CHECK maior ou igual a zero"
+        numeric monthly_base_rate "19,6 taxa base aplicada"
+        numeric monthly_spread "19,6 spread da strategy"
+        numeric face_value "19,2"
+        char face_currency
+        numeric present_value "19,2"
+        numeric discount_amount "19,2"
+        numeric settlement_amount "19,2"
+        char settlement_currency "ix_settlements_currency_settled_at"
+        numeric fx_rate "19,6 obrigatoria em cross-currency"
+        char fx_base_currency
+        char fx_quote_currency
+        timestamptz fx_rate_effective_at
+        varchar fx_rate_source
+        timestamptz settled_at "ix_settlements_settled_at DESC"
+    }
+```
+
+**Normalização até onde ela ajuda, e o desvio deliberado.** `assignors`, `receivables` e `fx_rates` estão em 3FN: nenhum atributo depende de outro que não seja a chave, e cedente não é texto repetido dentro do recebível. `settlements` **quebra isso de propósito**: `assignor_id`, `face_value`, `face_currency`, `term_months`, as taxas aplicadas e a cotação (`fx_rate`, `fx_base_currency`, `fx_quote_currency`, `fx_rate_effective_at`, `fx_rate_source`) são **copiados**, não referenciados. A razão é auditoria, não desempenho: um registro de liquidação precisa continuar reproduzível em 2030, quando a tabela de cotações tiver mil linhas novas e a taxa base tiver mudado três vezes. Se `settlements` apontasse para `fx_rates` por FK, o extrato de hoje reinterpretaria "qual taxa seria a vigente" — e é por isso que a relação com `FX_RATES` aparece no diagrama como **linha tracejada**: é linhagem do dado, não chave estrangeira.
+
+**As três cardinalidades que são regra de negócio, não desenho:**
+
+- **`receivables` 1—0..1 `settlements`**: `uk_settlements_receivable` torna o pagamento duplicado *impossível no banco*, não apenas improvável na aplicação. É a garantia que o teste de 8 threads concorrentes exercita.
+- **`assignors` 1—N `settlements`**: caminho direto do extrato analítico por cedente, apoiado em `ix_settlements_assignor_settled_at`. Chegar ao cedente via `receivables` exigiria `JOIN` no relatório mais lido do sistema.
+- **`idempotency_key` única em `settlements`**: idempotência tem última instância no banco. O Redis decide antes e mais barato; o `UNIQUE` decide de fato — chave perdida em failover custa trabalho repetido, nunca pagamento duplicado.
+
+**O que não é coluna e ainda assim mora no schema.** `ck_settlements_fx_required_when_cross_currency` recusa liquidação em moeda diferente da face sem cotação completa registrada — cross-currency sem taxa auditável não entra. E `trg_settlements_immutable` barra `UPDATE` e `DELETE` na tabela: correção se faz por lançamento compensatório (estorno), porque "alterar uma liquidação registrada não é uma operação do sistema". Nenhuma das duas depende de a aplicação se comportar bem.
+
+**Ausências deliberadas.** Não há tabela de idempotência separada (a chave é coluna única da própria liquidação — uma escrita a menos na transação de dinheiro), não há tabela de usuários (autenticação está fora desta entrega) e não há tabela de estorno: ela é o primeiro item que entra quando existir política de cancelamento, e o gatilho de imutabilidade já força esse caminho em vez do `UPDATE` silencioso.
 
 ---
 

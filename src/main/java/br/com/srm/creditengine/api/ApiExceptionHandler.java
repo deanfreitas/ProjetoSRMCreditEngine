@@ -14,6 +14,7 @@ import br.com.srm.creditengine.domain.receivable.ConcurrentSettlementException;
 import br.com.srm.creditengine.domain.receivable.ReceivableNotFoundException;
 import br.com.srm.creditengine.domain.receivable.ReceivableNotSettleableException;
 import br.com.srm.creditengine.domain.settlement.IdempotencyConflictException;
+import br.com.srm.creditengine.domain.settlement.SettlementInProgressException;
 import br.com.srm.creditengine.domain.settlement.SettlementNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,7 +79,8 @@ public class ApiExceptionHandler {
      *   <li><b>404</b>: recurso inexistente;</li>
      *   <li><b>409</b>: pedido valido que colide com o estado atual (ja liquidado, chave de
      *       idempotencia reusada, corrida perdida no optimistic locking) - repetir igual nao
-     *       resolve;</li>
+     *       resolve. A excecao e {@code SETTLEMENT_IN_PROGRESS}: ali repetir resolve, e a
+     *       repeticao devolve a liquidacao original;</li>
      *   <li><b>422</b>: pedido sintaticamente valido mas sem sentido financeiro;</li>
      *   <li><b>503</b>: dependencia indisponivel (cotacao ausente ou defasada) - vale
      *       tentar de novo mais tarde;</li>
@@ -95,6 +97,7 @@ public class ApiExceptionHandler {
             case ReceivableNotSettleableException ignored -> HttpStatus.CONFLICT;
             case ConcurrentSettlementException ignored -> HttpStatus.CONFLICT;
             case IdempotencyConflictException ignored -> HttpStatus.CONFLICT;
+            case SettlementInProgressException ignored -> HttpStatus.CONFLICT;
             case AssignorAlreadyRegisteredException ignored -> HttpStatus.CONFLICT;
             case FxRateAlreadyRegisteredException ignored -> HttpStatus.CONFLICT;
 

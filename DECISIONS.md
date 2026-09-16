@@ -109,13 +109,13 @@ Ou seja: o suporte multimoeda genuíno é uma mudança de **um** ponto na aplica
 
 ### 1.8 Cobertura de teste: estratégia em vez de percentual
 
-**O que ficou de fora.** Não há métrica de cobertura no build — nem JaCoCo, nem *gate* de percentual. São **90 invocações** (`mvn test`, confirmado nos relatórios do surefire: 90 testes, 0 falhas, 0 erros, 0 ignorados), distribuídas por decisão e não por arquivo.
+**O que ficou de fora.** Não há métrica de cobertura no build — nem JaCoCo, nem *gate* de percentual. São **96 invocações** (`mvn test`, confirmado nos relatórios do surefire: 96 testes, 0 falhas, 0 erros, 0 ignorados), distribuídas por decisão e não por arquivo.
 
 **Onde eu gastei teste, e por quê.** Nos quatro lugares onde errar custa dinheiro:
 
 1. **Golden cases ao centavo** (`GoldenCasesTest`, 4): C1/C2/C3 com valores esperados conferidos por cálculo independente, mais a invariante `face = valor presente + deságio`. Se o motor não bate ao centavo, nada mais importa;
 2. **Bordas de arredondamento e de prazo** (`PricingEngineTest`, 19 entre `Rounding`, `Fx` e `InvalidInput`; `TermCalculatorTest`, 6; `MoneyTest`, 4): empates de HALF_EVEN, prazo 0, 1 centavo, prazo longo, 30/360 com fração para cima, vencido recusado, FX obrigatório e direção do par. É a classe de erro que não aparece em teste de happy path e aparece no fechamento contábil;
-3. **Concorrência e ACID com banco real** (`SettlementServiceIntegrationTest`, 11): 8 threads no mesmo recebível → exatamente 1 pagamento; replay da chave; chave reusada com payload diferente; rollback quando o câmbio cai; taxa defasada e taxa futura recusadas; e a imutabilidade **barrada pela trigger** do PostgreSQL. Mock de repositório não valida UNIQUE, isolamento nem trigger — por isso Testcontainers e não H2;
+3. **Concorrência e ACID com banco real** (`SettlementServiceIntegrationTest`, 11): 8 threads no mesmo recebível → exatamente 1 pagamento; replay da chave; chave reusada com payload diferente; rollback quando o câmbio cai; taxa defasada e taxa futura recusadas; e a imutabilidade **barrada pela trigger** do PostgreSQL. Mock de repositório não valida UNIQUE, isolamento nem trigger — por isso Testcontainers e não H2. Mais 6 em `SettlementIdempotencyRedisIntegrationTest` para os modos de falha que o segundo datastore trouxe (seção 5), com Redis real: reserva compensada no rollback, gêmea em voo recusada na borda, conclusão fantasma perdendo para o banco e Redis inacessível não derrubando a liquidação;
 4. **Contrato HTTP** (`SettlementControllerTest`, 10 + `CreditEngineApiIntegrationTest`, 9 + `SettlementStatementQueryIntegrationTest`, 8): a tabela de status (201/200/400/404/409/503) com o handler real, o fluxo ponta a ponta do C3 e a paginação/totais do extrato no banco. Mais os 12 de `ResilientFxRateProviderTest` e 2 de `FxUpstreamRefreshIntegrationTest` para o comportamento sob falha do câmbio, e 5 de `CorrelationIdFilterTest` para o rastro de log — inclusive os dois casos negativos: cabeçalho forjado pelo cliente descartado e contexto que não vaza entre requisições da mesma thread.
 
 **O que eu deliberadamente não testei.** Getters e `equals` de records; mapeamento trivial de DTO (`MoneyView`, `AssignorView` e companhia — se quebrarem, quebram no teste de API, que é onde importa); caminhos de configuração (`PricingConfiguration`, `OpenApiConfiguration`, ligar/desligar bean por propriedade); o `MockExternalFxRateSource` em si, que é ferramenta de teste e não código de negócio; e `FxUpstreamHealthIndicator`, cujo comportamento interessante (disjuntor aberto → `DEGRADED`) é decisão de uma linha.
@@ -180,8 +180,8 @@ Coisas que parecem falta e são decisão. A diferença: eu não mudaria nenhuma 
 Inegociáveis mesmo com prazo estourando, porque o custo de errar neles não é retrabalho — é dinheiro errado no lugar errado.
 
 - **Tipo de dinheiro sobre `BigDecimal`.** `Money` não tem construtor a partir de `double`/`float`, e o Checkstyle **proíbe** `float`/`double` e `new BigDecimal(<literal numérico>)` no código de produção, na fase `validate` do build. Motivo de negócio: binário não representa 0,01; o erro aparece como centavo perdido que em milhares de liquidações vira divergência contábil e litígio. O enunciado chama isso de eliminatório a partir de pleno, e concordo — mas eu não faria diferente sem enunciado. Regra que depende de disciplina humana volta no primeiro sábado de pressa; por isso virou *gate* de build.
-- **Atomicidade e idempotência da liquidação.** Uma `@Transactional` cobrindo o UPDATE condicional do recebível e o INSERT da liquidação: ou as duas coisas, ou nenhuma. `Idempotency-Key` obrigatória, com *fingerprint* do pedido para distinguir retry legítimo de chave reaproveitada. Motivo de negócio: retry de rede e duplo clique são certeza, não hipótese, e liquidação pela metade significa cedente recebendo duas vezes — o incidente do Anexo B. Nunca vou trocar isso por uma feature.
-- **Unicidade como invariante no banco.** `uk_settlements_receivable` e `uk_settlements_idempotency_key`, mais o CHECK `ck_settlements_fx_required_when_cross_currency`. Motivo de negócio: validação em memória não sobrevive a duas instâncias da aplicação, e a segunda instância é o cenário normal em produção. A unicidade no banco é a rede que não depende do meu código estar correto — inclusive contra um bug futuro que eu mesmo vá introduzir.
+- **Atomicidade e idempotência da liquidação.** Uma `@Transactional` cobrindo o UPDATE condicional do recebível e o INSERT da liquidação: ou as duas coisas, ou nenhuma. `Idempotency-Key` obrigatória, com *fingerprint* do pedido para distinguir retry legítimo de chave reaproveitada. Motivo de negócio: retry de rede e duplo clique são certeza, não hipótese, e liquidação pela metade significa cedente recebendo duas vezes — o incidente do Anexo B. Nunca vou trocar isso por uma feature. **O guarda em Redis (seção 5) entrou na frente disso, não no lugar disso**: ele decide antes, o banco decide de fato.
+- **Unicidade como invariante no banco.** `uk_settlements_receivable` e `uk_settlements_idempotency_key`, mais o CHECK `ck_settlements_fx_required_when_cross_currency`. Motivo de negócio: validação em memória não sobrevive a duas instâncias da aplicação, e a segunda instância é o cenário normal em produção. A unicidade no banco é a rede que não depende do meu código estar correto — inclusive contra um bug futuro que eu mesmo vá introduzir. **Nem de o Redis estar de pé**: chave perdida em failover, TTL vencido ou reserva que não foi compensada custam trabalho repetido, não pagamento duplicado, porque o `UNIQUE` continua ali.
 - **Cotação congelada na auditoria.** A taxa é resolvida **uma vez** por liquidação e **copiada** para a linha (`fx_rate`, `fx_base_currency`, `fx_quote_currency`, `fx_rate_effective_at`, `fx_rate_source`) — não referenciada por chave estrangeira. Motivo de negócio: contestação de cedente é cenário real, e liquidação irreproduzível é liquidação indefensável. Referenciar a tabela de taxas deixaria o extrato reinterpretando qual taxa "seria" a vigente — reescrever o passado por *join*.
 - **Erro nunca responde 200.** `ApiExceptionHandler` concentra o mapa domínio → HTTP (400/404/409/422/503/500) com corpo `application/problem+json` e `errorCode` estável; nenhuma exceção é engolida, e o Checkstyle bane `catch` vazio sem exceção por comentário. Motivo de negócio: com 200 mentiroso, retry deixa de ser seguro, dashboard mente e integração marca "pago" o que não pagou. O comentário `// se falhar aqui, o insert já rodou, então segue o jogo` do Anexo A teria falhado o *gate* antes de qualquer revisor humano ler o PR.
 
@@ -206,3 +206,51 @@ Cinco fatias verticais, uma por branch, mergeadas com `--no-ff` como PR (confirm
 Por que essa e não outra: é o único item da rubrica em que esta entrega tira **zero** (item 4.2 do enunciado, dimensão de frontend do critério de 15%), enquanto os demais eixos já têm implementação e evidência. Marginalmente, é onde cada hora rende mais nota. E é a fatia mais barata que existe agora, justamente porque a fatia 3 entregou o contrato: a tela não precisa de nenhum endpoint novo nem de nenhuma mudança no backend.
 
 A alternativa que considerei e descartei foi **autenticação e escopo por cedente** (item 1.4). Ela é mais importante que o painel em qualquer medida de produção — e continuaria sendo a primeira coisa que eu faria antes de um deploy real. Mas num case sem usuários, sem ambiente e sem modelo de identidade definido, ela custa mais horas e me daria menos pontos do que a única dimensão da rubrica que está zerada. Prioridade de entrega e prioridade de produção não são a mesma lista — e é exatamente isso que este documento existe para deixar explícito.
+
+---
+
+## 5. Idempotência em Redis: o que mudou, o que não mudou e o que isso custou
+
+Mudança posterior às cinco fatias acima. Fica documentada aqui porque toca o único lugar do sistema onde há dinheiro, e porque a decisão só é defensável com o limite dela escrito.
+
+### 5.1 O que mudou
+
+A `Idempotency-Key` passou a ser **reservada em Redis antes** de o caso de uso resolver câmbio, precificar e abrir transação:
+
+| Peça | Papel |
+|---|---|
+| `IdempotencyStore` (porta, em `domain.settlement`) | Contrato da reserva. Nunca lança por falha de infraestrutura — degrada para `UNAVAILABLE`. |
+| `RedisIdempotencyStore` | `SET NX PX` com estado `PROCESSING` (TTL 30s) → `COMPLETED` + id da liquidação (TTL 24h). Compensação por script Lua que só apaga a reserva do próprio dono. |
+| `DisabledIdempotencyStore` | Modo sem Redis (`credit-engine.idempotency.enabled=false`): responde sempre `UNAVAILABLE`. |
+| `SettlementService` | Orquestra **fora** da transação: reserva → delega → publica conclusão pós-commit → compensa no rollback. |
+| `SettlementTransaction` | A transação do dinheiro, extraída do service. Só consulta `settlements` por chave quando a borda **não** garantiu a unicidade. |
+
+Ganho concreto, que era o problema declarado do desenho anterior: duas requisições simultâneas com a mesma chave não resolvem mais câmbio as duas para uma perder no `INSERT`. A segunda recebe `SETTLEMENT_IN_PROGRESS` (409) sem tocar no provedor externo nem no pool de conexões — e o replay puro (duplo clique, retry de rede) não consome `maximum-pool-size: 10`.
+
+**Por que a transação foi extraída para outra classe.** Não é gosto por camada: com tudo em um único método `@Transactional`, não existe "antes de a transação abrir" nem "depois de o rollback terminar" — e são exatamente esses dois instantes que a reserva e a compensação precisam ocupar. Reservar dentro da transação devolveria o problema que a mudança veio resolver.
+
+### 5.2 O que **não** mudou, e é o ponto todo
+
+`uk_settlements_idempotency_key` e `uk_settlements_receivable` continuam no PostgreSQL, commitados na mesma transação do pagamento. O Redis **decide antes**; o banco **decide de fato**. Reserva em Redis e `INSERT` no Postgres são dois sistemas sem commit em duas fases, e toda ordenação possível tem furo — então o desenho assume o furo em vez de fingir que ele não existe:
+
+1. **Falha aberto.** Qualquer erro do Redis vira `UNAVAILABLE` e a decisão volta para dentro da transação. Idempotência não pode ser causa de indisponibilidade — é a mesma regra da seção 2 ("prejuízo silencioso é pior que indisponibilidade"), aplicada ao inverso: aqui a indisponibilidade seria *causada pela proteção*. Por isso o health indicator do Redis está **desligado**: Redis fora do ar deixa a aplicação mais lenta, não insalubre, e marcar `DOWN` tiraria do balanceador um pod que liquida corretamente.
+2. **Reserva compensada no rollback.** É a linha mais importante de toda a mudança. Sem ela, um 503 de câmbio deixaria a chave reservada **sem pagamento nenhum**, e o retry legítimo do cliente receberia "duplicado" para dinheiro que nunca saiu. Isso é pior que pagar duas vezes, porque é silencioso: o cedente não recebe e o sistema jura que já pagou.
+3. **Valor de dinheiro nunca sai de cache.** No replay, o Redis diz *quem* é a chave; o corpo da resposta vem de `settlements`. Guarda afirmando conclusão que o banco não tem → o banco manda e o caminho completo é refeito (`phantom_completion` na métrica).
+4. **TTL não é prazo de validade da correção.** Expirada a janela, o retry cai no caminho do banco e é barrado pelo `UNIQUE`.
+
+Consequência honesta dessas quatro regras: **Redis aqui é otimização, não mecanismo de correção.** É essa a resposta para "por que não trocou de verdade" — trocar de verdade significaria remover a unicidade do banco, e aí uma chave perdida em failover viraria pagamento duplicado.
+
+### 5.3 O que isso custou
+
+- **Mais um SPOF operacional no caminho do dinheiro** (mesmo falhando aberto): mais um container no compose, mais um Testcontainer, mais métrica, mais plantão.
+- **Uma máquina de estados distribuída onde havia uma invariante de banco.** Ela tem modos de falha próprios, e por isso tem teste próprio: `SettlementIdempotencyRedisIntegrationTest`, 6 casos com Redis real — inclusive Redis inacessível e conclusão fantasma. Sem esses testes, "trocamos para Redis" seria afirmação, não evidência.
+- **Um estado HTTP novo** (`SETTLEMENT_IN_PROGRESS`, 409). É o único 409 do sistema em que **repetir resolve**, e isso está no OpenAPI e no README para não virar armadilha de integração.
+- **Uma janela de 30s** em que uma requisição que morreu entre a reserva e o commit faz o retry receber `SETTLEMENT_IN_PROGRESS`. Teto explícito: é o `in-progress-ttl`, e é por isso que ele é curto.
+
+### 5.4 Alternativa que continua sobre a mesa
+
+Se a dor fosse **apenas** o trabalho concorrente desperdiçado, havia uma solução sem segundo datastore: **INSERT antecipado da reserva no próprio PostgreSQL** (ou advisory lock por `receivable_id`) antes de resolver o câmbio — a perdedora falha cedo, sem chamar o provedor, sem quebrar a atomicidade. Ela resolve 1 dos 2 ganhos (elimina o trabalho duplicado, mas não alivia o pool de conexões no replay) e não adiciona SPOF. Está registrada aqui porque é a primeira coisa que eu proporia se o Redis se mostrar caro de operar.
+
+### 5.5 Risco aceito
+
+O *fingerprint* continua cobrindo apenas `receivableId|settlementCurrency`, e agora ele é comparado em **dois** lugares (Redis e banco). Campo novo em `SettlementRequest` que influencie valor precisa entrar no `fingerprint()` — senão chave reusada com payload materialmente diferente volta `200` com a liquidação antiga em vez do `409` contratado. Não é dívida introduzida por esta mudança, mas ela aumentou a superfície onde o descuido apareceria.

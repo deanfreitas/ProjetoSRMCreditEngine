@@ -104,6 +104,12 @@ recalcular nem repagar. Chave igual com payload diferente é conflito (`409`).
 **Por quê:** retry de rede e duplo clique são certeza, não hipótese. A unicidade tem de
 estar no banco: validação em memória não sobrevive a duas instâncias da aplicação.
 
+**Acréscimo posterior, sem mudança de premissa:** há um guarda de idempotência em Redis
+**na frente** dessa regra, que reserva a chave antes de resolver câmbio e precificar, para
+que a repetição não custe o trabalho caro. Ele é otimização, não autoridade — falha aberto
+para o caminho acima, e a unicidade continua no banco, na mesma transação do pagamento.
+Ver `DECISIONS.md`, seção 5.
+
 ### 2.7 Imutabilidade e auditoria
 
 **Premissa:** liquidação registrada não é editável nem deletável pela aplicação — não existe

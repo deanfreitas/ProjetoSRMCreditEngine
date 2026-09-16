@@ -18,16 +18,40 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    container_name: srm-credit-engine-redis
+    # appendonly ligado de proposito: o default do Redis perde escrita em queda, e a
+    # reserva de idempotencia e justamente o dado cuja perda custa trabalho repetido.
+    # Nao e o que garante a correcao (isso e o UNIQUE no PostgreSQL) - e o que evita
+    # degradar a cada reinicio.
+    command: [ "redis-server", "--appendonly", "yes", "--appendfsync", "everysec" ]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [ "CMD-SHELL", "redis-cli ping | grep -q PONG" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   app:
     build: .
     container_name: srm-credit-engine-app
     depends_on:
       db:
         condition: service_healthy
+      # Espera o Redis apenas para a demonstracao comecar limpa. A aplicacao sobe e
+      # liquida sem ele: o guarda de idempotencia falha aberto para o PostgreSQL.
+      redis:
+        condition: service_healthy
     environment:
       DB_URL: jdbc:postgresql://db:5432/srm_credit_engine
       DB_USERNAME: srm
       DB_PASSWORD: srm
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       # Provedor externo de cotacao (mockado) ligado apenas neste ambiente de
       # demonstracao: e ele que permite ver timeout, retry e disjuntor em acao sem
       # precisar cadastrar cotacao na mao.
@@ -43,3 +67,4 @@ services:
 
 volumes:
   db-data:
+  redis-data:

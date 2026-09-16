@@ -5,7 +5,7 @@ package br.com.srm.creditengine.application.statement;
  *
  * <p>Separada dos repositorios de escrita: o extrato nao carrega agregado de dominio, nao
  * participa de transacao de negocio e evolui por necessidade de relatorio. A implementacao
- * usa SQL nativo (ver {@code JdbcSettlementStatementQuery}).
+ * usa JPA/JPQL (ver {@code JpaSettlementStatementQuery}).
  */
 public interface SettlementStatementQuery {
 

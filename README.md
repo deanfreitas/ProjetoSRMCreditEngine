@@ -64,7 +64,7 @@ mvn spring-boot:run
 mvn test
 ```
 
-A suíte tem **96 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL` e `Redis`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui; e fake de Redis em memória não provaria `SET NX`, TTL nem script Lua.
+A suíte tem **98 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL` e `Redis`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui; e fake de Redis em memória não provaria `SET NX`, TTL nem script Lua.
 
 #### (d) Lint
 
@@ -73,6 +73,37 @@ mvn -B checkstyle:check
 ```
 
 O `maven-checkstyle-plugin` também está amarrado à fase `validate` do build (`config/checkstyle/checkstyle.xml`), então `mvn test` / `mvn verify` já falham no lint antes de compilar e gastar tempo de teste.
+
+---
+
+### Gestão de Credenciais e Segredos (AWS Secrets Manager)
+
+Para ambientes de produção ou homologação na AWS (ECS, EKS, EC2), as credenciais mais importantes — como as de **banco de dados** (`spring.datasource.username`, `spring.datasource.password`, `spring.datasource.url` ou `DB_USERNAME`, `DB_PASSWORD`, `DB_URL`) e Redis — são obtidas de forma segura através do **AWS Secrets Manager**, dispensando senhas em texto plano no código, no `application.yml` ou em arquivos de variáveis de ambiente.
+
+A integração utiliza o **Spring Cloud AWS Secrets Manager** (`io.awspring.cloud:spring-cloud-aws-starter-secrets-manager`) com resolução opcional (`optional:aws-secretsmanager:...`), o que garante que em ambiente local ou de teste a aplicação continue subindo com os defaults ou variáveis de ambiente sem exigir conexão com a AWS.
+
+#### Variáveis de configuração da AWS
+
+| Variável | Descrição | Default |
+|---|---|---|
+| `AWS_SECRETS_MANAGER_ENABLED` | Habilita a integração com o AWS Secrets Manager | `false` |
+| `AWS_SECRETS_NAME` | Nome/caminho do segredo no AWS Secrets Manager | `/secret/srm-credit-engine` |
+| `AWS_REGION` | Região da AWS onde o segredo está armazenado | `us-east-1` |
+| `AWS_ENDPOINT_URL` | Endpoint customizado da AWS (opcional, para LocalStack) | *(vazio)* |
+
+#### Exemplo de payload JSON armazenado no AWS Secrets Manager
+
+```json
+{
+  "spring.datasource.username": "srm_prod_user",
+  "spring.datasource.password": "SuperSecurePassword123!",
+  "spring.datasource.url": "jdbc:postgresql://aurora-cluster.srm.internal:5432/srm_credit_engine",
+  "REDIS_HOST": "redis-cluster.srm.internal",
+  "REDIS_PORT": "6379"
+}
+```
+
+A aplicação autentica automaticamente usando a cadeia padrão de credenciais da AWS (*AWS Default Credentials Provider Chain*), permitindo autenticação nativa via **IAM Roles for Service Accounts (IRSA)** no EKS, **ECS Task Execution Role** no ECS ou **Instance Profile** no EC2.
 
 ---
 
@@ -350,7 +381,7 @@ Corte deliberado para caber no esforço e na barra sênior do caminho de dinheir
 - **Autenticação e autorização** — ausência declarada, não disfarçada: é pré-requisito de primeiro deploy, não "endurecimento".
 - **Integração real de cotação** (PTAX/mesa) — o mock vive atrás da porta `ExternalFxRateSource`; o que importa no desenho é o comportamento sob falha, e esse está implementado e testado.
 - **Tracing distribuído, rate limiting e manifests de deploy** — pagam quando existe segundo serviço, identidade de chamador e cluster.
-- **Itens do nível staff** (ADRs formais, design de 1M tx/min, EDA, post-mortem do Anexo B) — explicitamente substitutivos daquele nível, não requisitos do sênior.
+- **Itens do nível staff** (ADRs formais, design de 1M tx/min, post-mortem do Anexo B) — explicitamente substitutivos daquele nível, não requisitos do sênior. Uma exceção: a **proposta de arquitetura orientada a eventos** existe em [`EDA.md`](EDA.md), escrita como ADR — e a decisão registrada lá é **manter as escritas síncronas**, com os gatilhos observáveis que reabririam a discussão.
 
 ---
 
@@ -362,6 +393,7 @@ Corte deliberado para caber no esforço e na barra sênior do caminho de dinheir
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | C4 níveis 1-2, fluxo da liquidação e do câmbio fora do ar |
 | [`REVIEW.md`](REVIEW.md) | Review do Anexo A |
 | [`DECISIONS.md`](DECISIONS.md) | O que foi cortado e por quê, com risco aceito |
+| [`EDA.md`](EDA.md) | Mensageria e eventos (SQS, FIFO, Kafka, cache de leitura): opções avaliadas, decisão e gatilhos |
 | [`AI_USAGE.md`](AI_USAGE.md) | Como a IA foi usada, onde errou e como o processo pegou |
 | `desafio-tecnico-srm-credit-engine-v2 (3).md` | Enunciado |
 | `src/main/resources/db/migration/V1__initial_schema.sql` | Invariantes no banco |

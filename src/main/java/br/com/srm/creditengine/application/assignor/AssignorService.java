@@ -4,7 +4,7 @@ import br.com.srm.creditengine.domain.assignor.Assignor;
 import br.com.srm.creditengine.domain.assignor.AssignorAlreadyRegisteredException;
 import br.com.srm.creditengine.domain.assignor.AssignorNotFoundException;
 import br.com.srm.creditengine.domain.assignor.AssignorRepository;
-import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,7 +38,7 @@ public class AssignorService {
         Assignor assignor = new Assignor(UUID.randomUUID(), document, legalName, clock.instant());
         try {
             return assignorRepository.save(assignor);
-        } catch (DuplicateKeyException e) {
+        } catch (DataIntegrityViolationException e) {
             throw new AssignorAlreadyRegisteredException(document);
         }
     }

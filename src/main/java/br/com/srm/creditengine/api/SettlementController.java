@@ -35,7 +35,11 @@ import java.net.URI;
  *   <li>repeticao da mesma chave com o mesmo corpo devolve {@code 200} e a liquidacao
  *       original - nada novo e gravado;</li>
  *   <li>mesma chave com corpo diferente devolve {@code 409}: o cliente pediu outra coisa
- *       reusando a chave, e devolver a liquidacao anterior seria mentir para ele.</li>
+ *       reusando a chave, e devolver a liquidacao anterior seria mentir para ele;</li>
+ *   <li>mesma chave e mesmo corpo <b>enquanto a primeira ainda roda</b> devolve
+ *       {@code 409} com {@code errorCode=SETTLEMENT_IN_PROGRESS}: aqui repetir resolve, e a
+ *       repeticao seguinte cai no caso do {@code 200}. Recusar cedo evita que as duas
+ *       requisicoes resolvam cotacao e precifiquem para uma delas ser descartada.</li>
  * </ul>
  */
 @RestController
@@ -60,7 +64,8 @@ public class SettlementController {
             @ApiResponse(responseCode = "400", description = "Payload invalido ou Idempotency-Key ausente", content = @Content),
             @ApiResponse(responseCode = "404", description = "Recebivel inexistente", content = @Content),
             @ApiResponse(responseCode = "409",
-                    description = "Recebivel ja liquidado, liquidacao concorrente ou chave reusada com outro payload",
+                    description = "Recebivel ja liquidado, liquidacao concorrente, chave reusada com outro payload "
+                            + "ou chave ainda em processamento (SETTLEMENT_IN_PROGRESS: repita em instantes)",
                     content = @Content),
             @ApiResponse(responseCode = "503",
                     description = "Cotacao indisponivel ou defasada: nada foi gravado, pode repetir",

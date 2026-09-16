@@ -9,6 +9,15 @@ spring:
       # Liquidacao e transacao curta; pool pequeno e explicito evita esconder contencao.
       maximum-pool-size: 10
       connection-timeout: 3000
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Timeouts curtos e obrigatorios: o guarda de idempotencia fica no caminho do
+      # dinheiro, e Redis lento sem teto seria contencao adicionada por uma otimizacao.
+      # Estourar o prazo nao falha a liquidacao - degrada para o caminho do PostgreSQL.
+      timeout: 200ms
+      connect-timeout: 200ms
   jpa:
     open-in-view: false
     hibernate:
@@ -49,6 +58,19 @@ credit-engine:
     base-monthly-rate: 0.01
     duplicata-monthly-spread: 0.015
     cheque-monthly-spread: 0.025
+  idempotency:
+    # Guarda em Redis na borda: reserva a Idempotency-Key antes de resolver cambio,
+    # precificar e abrir transacao. Nao substitui uk_settlements_idempotency_key nem
+    # uk_settlements_receivable - com ele desligado ou fora do ar, a decisao volta para
+    # dentro da transacao e o sistema continua correto (DECISIONS.md, secao 5).
+    enabled: ${CREDIT_ENGINE_IDEMPOTENCY_ENABLED:true}
+    key-prefix: "srm:idempotency:settlement:"
+    # Teto do prejuizo se o processo morrer entre reservar e commitar: por este prazo um
+    # retry legitimo recebe SETTLEMENT_IN_PROGRESS. Precisa cobrir a pior liquidacao
+    # plausivel (cotacao externa com timeout e retry) sem esgotar a paciencia do cliente.
+    in-progress-ttl: 30s
+    # Janela em que o retry de chave concluida e respondido sem refazer o trabalho caro.
+    completed-ttl: 24h
   fx:
     # Cotacao mais velha que isso nao liquida: falha com 503 em vez de usar taxa defasada.
     max-staleness: 12h
@@ -86,3 +108,10 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+  health:
+    redis:
+      # Coerente com o desenho: o guarda falha aberto, entao Redis fora do ar nao torna a
+      # aplicacao insalubre - ela fica mais lenta. Marcar DOWN aqui tiraria o pod do
+      # balanceador por causa de uma otimizacao, transformando idempotencia em causa de
+      # indisponibilidade. O que observar e credit_engine.idempotency{result=unavailable}.
+      enabled: false

@@ -25,7 +25,20 @@
         <logstash.encoder.version>8.0</logstash.encoder.version>
         <checkstyle.plugin.version>3.5.0</checkstyle.plugin.version>
         <checkstyle.version>10.18.2</checkstyle.version>
+        <spring-cloud-aws.version>3.1.1</spring-cloud-aws.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>io.awspring.cloud</groupId>
+                <artifactId>spring-cloud-aws-dependencies</artifactId>
+                <version>${spring-cloud-aws.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
@@ -107,6 +120,10 @@
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.awspring.cloud</groupId>
+            <artifactId>spring-cloud-aws-starter-secrets-manager</artifactId>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>

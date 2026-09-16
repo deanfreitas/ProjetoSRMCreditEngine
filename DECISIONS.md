@@ -30,15 +30,17 @@ Ou seja: o contrato que o frontend consumiria não é promessa, é código com t
 
 **Risco aceito.** O avaliador não vê o sistema funcionando por uma tela — vê por `curl`/Swagger. Assumo que a sequência de `curl` do `README.md` cumpre esse papel e que a defesa ao vivo acontece sobre o código.
 
-### 1.2 Itens do nível staff — não perseguidos
+### 1.2 Itens do nível staff — não perseguidos (com uma exceção)
 
-**O que ficou de fora.** Os quatro artefatos da §6 staff: **ADRs formais** para as decisões difíceis, **documento de design para 1 milhão de transações/minuto** (caching, sharding, consistência eventual e o que muda na semântica de idempotência nessa escala), **proposta de arquitetura orientada a eventos** para o fluxo de liquidação, e o **post-mortem do Anexo B** (liquidações duplicadas na sexta às 18h40).
+**O que ficou de fora.** Três dos quatro artefatos da §6 staff: **ADRs formais** para as decisões difíceis, **documento de design para 1 milhão de transações/minuto** (caching, sharding, consistência eventual e o que muda na semântica de idempotência nessa escala), e o **post-mortem do Anexo B** (liquidações duplicadas na sexta às 18h40).
+
+**O quarto passou a existir, e o motivo importa.** A **proposta de arquitetura orientada a eventos** está em [`EDA.md`](EDA.md), escrita como ADR longo. Ela não nasceu de planejamento: nasceu de uma discussão real sobre este código — SQS Standard com 4 retentativas e DLQ na frente de create/update, depois SQS FIFO, depois Kafka, depois "Kafka permite tirar o Redis?", depois Kafka na escrita com Redis na leitura, e finalmente "trocar o HTTP pelo Kafka". Seis opções avaliadas contra o código que existe, cada uma com veredito. **A decisão registrada lá é manter as escritas síncronas** — o documento existe para dizer *por que não*, com gatilhos observáveis que reabririam a questão (contenção medida no pool, requisito real de lote, primeiro consumidor de efeito, extrato acima do p95 do `SPEC.md` §5). Registrar a recusa argumentada é mais útil, e mais difícil de fingir, que desenhar um broker que ninguém pediu.
 
 **O que isso não inclui.** O diagrama C4 (níveis 1 e 2) é requisito do nível **sênior**, não do staff, e está entregue em `ARCHITECTURE.md`. A fronteira aqui é outra: ficou de fora a documentação de decisão que **substitui** implementação.
 
 **Por quê.** O próprio enunciado marca esse nível como *parcialmente substitutivo*: quem o persegue **reduz o escopo de implementação** em troca de decisão documentada. Eu escolhi o outro lado do balanço — entregar o eixo de operação implementado e verificável — então esses itens não são requisitos do nível que eu declarei perseguir, e listá-los como "próximos passos" seria fingir que a entrega mira dois níveis ao mesmo tempo.
 
-**O que eu faria com mais tempo.** Nesta ordem: (1) post-mortem do Anexo B, porque é o mais barato e o mais próximo do que já existe — o `REVIEW.md` já contém a linha do tempo, as três janelas de corrida e a prevenção sistêmica, faltando o formato de incidente com contenção e comunicação; (2) três ADRs curtos (SQL vs. NoSQL, JDBC vs. JPA, síncrono vs. eventos), que hoje vivem espalhados entre `SPEC.md`, `README.md` e este documento; (3) o design de alta escala, que é o mais caro e o que menos aproveita código existente.
+**O que eu faria com mais tempo.** Nesta ordem: (1) post-mortem do Anexo B, porque é o mais barato e o mais próximo do que já existe — o `REVIEW.md` já contém a linha do tempo, as três janelas de corrida e a prevenção sistêmica, faltando o formato de incidente com contenção e comunicação; (2) dois ADRs curtos (SQL vs. NoSQL, JDBC vs. JPA), que hoje vivem espalhados entre `SPEC.md`, `README.md` e este documento — o terceiro, *síncrono vs. eventos*, já está em `EDA.md`; (3) o design de alta escala, que é o mais caro e o que menos aproveita código existente.
 
 **Risco aceito.** Se a banca estiver avaliando este repositório na barra staff, eu perco os **20%** de "operação e arquitetura" desse nível por falta de documento, mesmo tendo implementação. Assumo esse risco porque o alvo está declarado desde o `SPEC.md` §1.
 
@@ -254,3 +256,17 @@ Se a dor fosse **apenas** o trabalho concorrente desperdiçado, havia uma soluç
 ### 5.5 Risco aceito
 
 O *fingerprint* continua cobrindo apenas `receivableId|settlementCurrency`, e agora ele é comparado em **dois** lugares (Redis e banco). Campo novo em `SettlementRequest` que influencie valor precisa entrar no `fingerprint()` — senão chave reusada com payload materialmente diferente volta `200` com a liquidação antiga em vez do `409` contratado. Não é dívida introduzida por esta mudança, mas ela aumentou a superfície onde o descuido apareceria.
+
+---
+
+## 6. Gestão de Credenciais com AWS Secrets Manager
+
+### 6.1 Contexto e Motivação
+Em ambiente financeiro com requisitos estritos de segurança e conformidade (LGPD, SOX, PCI-DSS), credenciais críticas — especialmente a senha e usuário de acesso ao banco de dados relacional PostgreSQL e instâncias de cache — **não devem residir em texto plano** em arquivos de propriedades versionados, variáveis de ambiente estáticas no container ou arquivos de configuração compartilhados.
+
+### 6.2 Decisão Arquitetural
+Adotamos o **AWS Secrets Manager** via **Spring Cloud AWS Secrets Manager** (`io.awspring.cloud:spring-cloud-aws-starter-secrets-manager` 3.1.1) integrado nativamente ao ciclo de vida do Spring Boot através de `spring.config.import=optional:aws-secretsmanager:...`.
+
+- **Zero credenciais em código:** Na nuvem AWS (ECS, EKS, EC2), a aplicação autentica através de IAM Roles (IRSA / Task Roles) e puxa o segredo JSON diretamente da AWS antes da inicialização do pool Hikari e do Flyway.
+- **Fail-safe para desenvolvimento local e testes:** A importação é declarada como `optional:`, com `spring.cloud.aws.secretsmanager.enabled: ${AWS_SECRETS_MANAGER_ENABLED:false}`. Dessa forma, em ambiente local (Docker Compose) e em suítes de testes automatizados (Testcontainers), a aplicação utiliza os valores de ambiente/defaults locais sem depender de conectividade com a nuvem ou falhar em isolamento.
+- **Rotação de credenciais:** Permite rotação automática de senhas gerenciada pelo AWS Secrets Manager em conjunto com RDS Aurora sem necessidade de recompilação da imagem da aplicação.

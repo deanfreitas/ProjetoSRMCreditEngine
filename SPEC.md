@@ -138,6 +138,17 @@ não existe construtor de `Money` a partir de `double`.
 unidade contábil de BRL e USD. Taxas com 6 casas cobrem BRL/USD (4 casas de mercado) com
 margem.
 
+### 2.10 Modelo de dados
+
+**Premissa:** quatro tabelas — `assignors`, `receivables`, `fx_rates` e `settlements` —
+normalizadas até 3FN, com uma desnormalização deliberada: `settlements` **copia** os valores,
+as taxas aplicadas e a cotação em vez de referenciá-las, porque registro de auditoria
+precisa continuar reproduzível depois de a tabela de cotações e a taxa base mudarem.
+
+O **diagrama ER**, com chaves, `UNIQUE`, `CHECK`, índices e o gatilho de imutabilidade, está
+em `ARCHITECTURE.md`, seção *Modelo de dados*; a fonte de verdade é
+`src/main/resources/db/migration/V1__initial_schema.sql`.
+
 ## 3. Perguntas que eu faria ao negócio
 
 1. **Prazo:** contagem em dias corridos convertidos em mês comercial (30/360), dias úteis, ou

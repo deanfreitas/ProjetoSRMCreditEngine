@@ -64,7 +64,7 @@ mvn spring-boot:run
 mvn test
 ```
 
-A suíte tem **98 testes** (invocações JUnit, incluindo `@ParameterizedTest`). Testes de integração usam **Testcontainers** (`PostgreSQL` e `Redis`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui; e fake de Redis em memória não provaria `SET NX`, TTL nem script Lua.
+A suíte tem **98 testes** (invocações JUnit, incluindo `@ParameterizedTest`; número lido do sumário do surefire, e a tabela da seção *Testes / evidência* soma exatamente isso). Testes de integração usam **Testcontainers** (`PostgreSQL` e `Redis`) — **Docker precisa estar rodando**. H2 não entra no caminho: dialeto, `NUMERIC` e locking importam exatamente aqui; e fake de Redis em memória não provaria `SET NX`, TTL nem script Lua.
 
 #### (d) Lint
 
@@ -320,7 +320,7 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 
 ### Testes / evidência
 
-**96 invocações** no total (`mvn test`). Por classe:
+**98 invocações** no total (`mvn test`: 98 testes, 0 falhas, 0 erros, 0 ignorados). Por classe — a coluna `#` soma 98:
 
 | Classe | # | O que prova |
 |--------|---|-------------|
@@ -336,6 +336,7 @@ Nenhuma exceção é engolida: o `catch` vazio do Anexo A é o anti-padrão que 
 | `SettlementControllerTest` | 10 | contrato HTTP de status (201/200/400/404/409/503) com handler real |
 | `ResilientFxRateProviderTest` | 12 | sem Spring e sem banco: caminho rápido sem tocar no terceiro, timeout cortando a espera, retry cobrindo falha passageira, disjuntor abrindo e falhando rápido sem bater no provedor, disjuntor aberto **não** bloqueando quando há taxa fresca em casa, recuperação em half-open, par desconhecido sem retry nem disjuntor, e recusa de taxa de par trocado / vigência futura / defasada, além da tolerância de skew |
 | `FxUpstreamRefreshIntegrationTest` | 2 | em PostgreSQL real: cotação trazida do provedor entra no histórico e a segunda consulta é servida pelo histórico; liquidação cross-currency reproduz o golden case C3 (`US$ 17.094,67`) usando a taxa do provedor e a congela na auditoria |
+| `AwsSecretsManagerIntegrationTest` | 2 | credenciais de banco e Redis lidas de payload JSON do AWS Secrets Manager; segredo inexistente **falha alto** em vez de a aplicação subir com default silencioso |
 
 Integração = PostgreSQL real via Testcontainers + schema Flyway, mais Redis real onde o guarda de idempotência está no caminho.
 
@@ -390,7 +391,7 @@ Corte deliberado para caber no esforço e na barra sênior do caminho de dinheir
 | Artefato | Uso |
 |----------|-----|
 | [`SPEC.md`](SPEC.md) | Premissas, precisão, critérios de aceite |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | C4 níveis 1-2, fluxo da liquidação e do câmbio fora do ar |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | C4 níveis 1-2, **diagrama ER** do schema, fluxo da liquidação e do câmbio fora do ar |
 | [`REVIEW.md`](REVIEW.md) | Review do Anexo A |
 | [`DECISIONS.md`](DECISIONS.md) | O que foi cortado e por quê, com risco aceito |
 | [`EDA.md`](EDA.md) | Mensageria e eventos (SQS, FIFO, Kafka, cache de leitura): opções avaliadas, decisão e gatilhos |

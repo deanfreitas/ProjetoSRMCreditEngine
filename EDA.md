@@ -98,7 +98,7 @@ Kafka não é "SQS melhor": é **log particionado e replayável**, com consumo p
 2. **Perde a dedup de 5 minutos do FIFO.** `enable.idempotence=true` cobre retry de rede do **produtor** na sessão; não é idempotência de negócio. Consumo é at-least-once. Portanto a chave única no Postgres fica **mais** essencial, não menos.
 3. **Transação Kafka não abrange o Postgres.** Escrever no banco e produzir no tópico continua sendo escrita dual → **outbox obrigatório** (com Debezium/CDC como opção).
 4. **Rebalance é modo de falha novo.** `max.poll.interval.ms` estourado (liquidação gasta até 3 × 800ms + transação) causa rebalance, reprocessamento e duplicata — o análogo do `VisibilityTimeout`, com efeito em todo o grupo.
-5. **Custo operacional muito maior:** broker/KRaft ou MSK, partições, retenção, `min.insync.replicas`, schema registry, monitoramento de lag. No `docker-compose.yml` atual (Postgres + Redis + app) entra broker + registry, e Testcontainers Kafka deixa a suíte de 96 testes sensivelmente mais lenta.
+5. **Custo operacional muito maior:** broker/KRaft ou MSK, partições, retenção, `min.insync.replicas`, schema registry, monitoramento de lag. No `docker-compose.yml` atual (Postgres + Redis + app) entra broker + registry, e Testcontainers Kafka deixa a suíte de 98 testes sensivelmente mais lenta.
 6. **DLT não é gerenciada:** retry topic e DLT são tópicos que você cria, monitora e faz redrive.
 7. **Schema versionado passa a ser obrigatório** (Avro/Protobuf + registry): com retenção longa e replay, mensagem de hoje será lida por código de amanhã — o SQS perdoava isso porque a mensagem morria em 14 dias.
 

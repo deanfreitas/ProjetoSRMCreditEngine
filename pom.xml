@@ -32,9 +32,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
-        <!-- Spring JDBC (JdbcClient) em vez de JPA: o SQL fica explicito e parametrizado,
-             o optimistic locking e um UPDATE ... WHERE version = ? que da para ler, e os
-             relatorios ja nascem em SQL nativo. Ver DECISIONS.md. -->
+        <!-- Spring Data JPA para operacoes de escrita e gerenciamento de entidades (@Entity, @Table) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <!-- Spring JDBC (JdbcClient): consultas analiticas e extratos continuam em SQL nativo -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>

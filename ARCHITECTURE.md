@@ -55,7 +55,7 @@ No `docker-compose.yml` são dois containers de verdade — `app` e `db` — e o
 
 | Container | Responsabilidade | Tecnologia | Escala e falha |
 |-----------|------------------|------------|----------------|
-| `app` | Contrato HTTP, orquestração dos casos de uso, motor de precificação, fronteira transacional, resiliência do câmbio, métricas de negócio | Java 21, Spring Boot 3.3, Spring JDBC `JdbcClient`, springdoc, Micrometer, resilience4j; Dockerfile multi-stage com usuário sem privilégio e `ExitOnOutOfMemoryError` | **Stateless** — escala horizontal atrás de balanceador, sem sessão nem cache local de estado. Nenhuma garantia depende de haver uma única instância: idempotência e unicidade moram no banco. Instância que cai é substituída; requisição em voo é desfeita pela transação e o cliente repete com a mesma `Idempotency-Key`. Pool Hikari de 10 conexões com `connection-timeout` de 3s, pequeno de propósito para que contenção apareça em vez de se esconder. |
+| `app` | Contrato HTTP, orquestração dos casos de uso, motor de precificação, fronteira transacional, resiliência do câmbio, métricas de negócio | Java 21, Spring Boot 3.3, Spring Data JPA para entidades e extratos, springdoc, Micrometer, resilience4j; Dockerfile multi-stage com usuário sem privilégio e `ExitOnOutOfMemoryError` | **Stateless** — escala horizontal atrás de balanceador, sem sessão nem cache local de estado. Nenhuma garantia depende de haver uma única instância: idempotência e unicidade moram no banco. Instância que cai é substituída; requisição em voo é desfeita pela transação e o cliente repete com a mesma `Idempotency-Key`. Pool Hikari de 10 conexões com `connection-timeout` de 3s, pequeno de propósito para que contenção apareça em vez de se esconder. |
 | `db` | Persistência e **invariantes**: unicidade, checks, `version` para optimistic locking, gatilho de imutabilidade, índices do extrato | PostgreSQL 16, `NUMERIC(19,2)` para valores e `NUMERIC(19,6)` para taxas, Flyway | **Escala vertical + réplica de leitura** seria o próximo passo natural — o extrato é o único consumidor pesado de leitura e já está isolado atrás de `SettlementStatementQuery`. Ponto único de falha assumido: banco fora do ar é o sistema fora do ar, com **503 `PERSISTENCE_UNAVAILABLE`** em vez de resposta parcial. Não existe caminho de escrita que contorne o banco. |
 | Provedor de cotação | Cotação do par quando não há taxa vigente e fresca no histórico | `ExternalFxRateSource`; hoje `MockExternalFxRateSource`, ligado só no compose via `CREDIT_ENGINE_FX_UPSTREAM_ENABLED=true` | **Não escala por nós** — é de terceiro. Fora do ar: o disjuntor `fx-upstream` abre, a liquidação cross-currency **sem taxa fresca** falha com 503 e o `FxUpstreamHealthIndicator` publica `DEGRADED` — não `DOWN`, porque liquidação em moeda única e cross-currency com taxa fresca continuam funcionando e marcar a aplicação como fora do ar faria o orquestrador derrubar instância saudável. Desligado, `fxRateProvider` é apenas `StoredFxRateProvider` sobre o histórico do banco. |
 
@@ -91,19 +91,19 @@ flowchart TB
 
 | Porta | Onde é declarada | Implementação |
 |-------|------------------|---------------|
-| `ReceivableRepository` | `domain.receivable` | `JdbcReceivableRepository` |
-| `SettlementRepository` | `domain.settlement` | `JdbcSettlementRepository` |
-| `AssignorRepository` | `domain.assignor` | `JdbcAssignorRepository` |
-| `FxRateRepository` | `domain.fx` | `JdbcFxRateRepository` |
+| `ReceivableRepository` | `domain.receivable` | `JpaReceivableRepository` |
+| `SettlementRepository` | `domain.settlement` | `JpaSettlementRepository` |
+| `AssignorRepository` | `domain.assignor` | `JpaAssignorRepository` |
+| `FxRateRepository` | `domain.fx` | `JpaFxRateRepository` |
 | `FxRateProvider` | `domain.fx` | `StoredFxRateProvider` e `ResilientFxRateProvider` |
 | `BaseRateProvider` | `domain.pricing` | `FixedBaseRateProvider` |
 | `ExternalFxRateSource` | `infrastructure.fx` | `MockExternalFxRateSource` |
 | `FxRateWriter` | `infrastructure.fx` | `TransactionalFxRateWriter` |
-| `SettlementStatementQuery` | `application.statement` | `JdbcSettlementStatementQuery` |
+| `SettlementStatementQuery` | `application.statement` | `JpaSettlementStatementQuery` |
 
 Duas assimetrias são deliberadas. `ExternalFxRateSource` e `FxRateWriter` vivem em `infrastructure.fx`, não no domínio: o domínio conhece **`FxRateProvider`** — "de onde vem a taxa" com contrato de ou devolver cotação válida ou falhar — e não precisa saber que existe um terceiro na rede nem que a gravação da cotação trazida acontece em transação própria (`REQUIRES_NEW`, para sobreviver ao rollback da liquidação). `SettlementStatementQuery` fica em `application.statement` porque o extrato não carrega agregado de domínio nem participa de transação de negócio.
 
-**(c) O atalho consciente do extrato analítico.** `SettlementStatementController` chama diretamente a porta de leitura `SettlementStatementQuery`, cuja implementação é SQL nativo com paginação e totais calculados no banco, apoiada nos índices `ix_settlements_settled_at`, `ix_settlements_assignor_settled_at` e `ix_settlements_currency_settled_at`. Não há service de aplicação no meio: ele só repassaria a chamada. O item **4.1.7** do enunciado autoriza SQL nativo para o extrato; camada vazia é acoplamento sem benefício, e o critério para ela deixar de ser vazia é claro — no dia em que o extrato ganhar regra própria, como redação de valores por perfil de acesso, o service passa a existir porque terá o que fazer.
+**(c) O atalho consciente do extrato analítico.** `SettlementStatementController` chama diretamente a porta de leitura `SettlementStatementQuery`, cuja implementação é JPA/JPQL com paginação e totais calculados no banco, apoiada nos índices `ix_settlements_settled_at`, `ix_settlements_assignor_settled_at` e `ix_settlements_currency_settled_at`. Não há service de aplicação no meio: ele só repassaria a chamada. O item **4.1.7** do enunciado autoriza consulta direta para o extrato; camada vazia é acoplamento sem benefício, e o critério para ela deixar de ser vazia é claro — no dia em que o extrato ganhar regra própria, como redação de valores por perfil de acesso, o service passa a existir porque terá o que fazer.
 
 ---
 

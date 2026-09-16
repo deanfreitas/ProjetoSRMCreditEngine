@@ -17,7 +17,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -109,7 +109,7 @@ public class SettlementService {
 
         try {
             settlementRepository.save(settlement);
-        } catch (DuplicateKeyException e) {
+        } catch (DataIntegrityViolationException e) {
             // Corrida na mesma chave ou no mesmo recebivel: a unicidade do banco e a
             // ultima linha de defesa. Esta transacao perdeu e precisa ser desfeita -
             // o cliente repete a requisicao e recebe a liquidacao original.

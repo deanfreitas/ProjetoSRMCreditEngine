@@ -4,7 +4,7 @@ import br.com.srm.creditengine.domain.fx.FxRate;
 import br.com.srm.creditengine.domain.fx.FxRateRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -42,7 +42,7 @@ public class TransactionalFxRateWriter implements FxRateWriter {
         return transactionTemplate.execute(status -> {
             try {
                 return fxRateRepository.save(rate);
-            } catch (DuplicateKeyException e) {
+            } catch (DataIntegrityViolationException e) {
                 log.debug("Cotacao {}/{} com vigencia {} ja estava gravada; mantendo a existente",
                         rate.baseCurrency(), rate.quoteCurrency(), rate.effectiveAt());
                 status.setRollbackOnly();

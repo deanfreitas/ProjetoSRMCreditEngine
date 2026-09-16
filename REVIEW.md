@@ -13,7 +13,7 @@
 
 **Impacto em produção.** O recebível “ainda está aberto”. Operador, job ou retry do cliente liquida de novo. Cedente recebe **duas vezes**. É exatamente o incidente do Anexo B (três cedentes pagos em duplicidade). Pior: o `catch` vazio apaga a evidência — plantão não vê erro, só o extrato estourado.
 
-**Correção neste repo.** `SettlementService.settle` é `@Transactional`: `receivableRepository.settle(...)` e `settlementRepository.save(...)` na **mesma** transação — ou as duas coisas, ou nenhuma. `JdbcSettlementRepository` só faz INSERT/SELECT; se a unicidade do banco rejeitar, `DuplicateKeyException` vira `ConcurrentSettlementException` e a transação desfaz o UPDATE. Não existe `catch` vazio no caminho feliz nem no de erro.
+**Correção neste repo.** `SettlementService.settle` é `@Transactional`: `receivableRepository.settle(...)` e `settlementRepository.save(...)` na **mesma** transação — ou as duas coisas, ou nenhuma. `JpaSettlementRepository` só faz persistência de entidades; se a unicidade do banco rejeitar, a restrição de integridade vira `ConcurrentSettlementException` e a transação desfaz o UPDATE. Não existe `catch` vazio no caminho feliz nem no de erro.
 
 ### B2. Sem idempotência, sem unicidade, sem optimistic locking
 
@@ -26,7 +26,7 @@
 - Aplicação: `SettleReceivableCommand` exige `idempotencyKey`; `fingerprint()` (SHA-256 de `receivableId|settlementCurrency`) distingue retry legítimo de chave reaproveitada com payload diferente (`IdempotencyConflictException`).
 - Ordem em `SettlementService`: **idempotência primeiro** (`findByIdempotencyKey`) → elegibilidade → câmbio → UPDATE+INSERT.
 - Banco (`V1__initial_schema.sql`): `uk_settlements_receivable` e `uk_settlements_idempotency_key`. Unicidade em memória não sobrevive a duas JVMs; a do banco é a última linha de defesa.
-- Concorrência: `JdbcReceivableRepository.settle` faz `UPDATE ... WHERE id = :id AND version = :version AND status = 'PENDING'`. Zero linhas → `ConcurrentSettlementException`. Domínio reforça em `Receivable.settled()`.
+- Concorrência: `JpaReceivableRepository.settle` faz `UPDATE ... WHERE id = :id AND version = :version AND status = 'PENDING'`. Zero linhas → `ConcurrentSettlementException`. Domínio reforça em `Receivable.settled()`.
 
 ### B3. SQL injection por interpolação de `receivableId` e `currency`
 
@@ -35,7 +35,7 @@
 
 **Impacto em produção.** Leitura/alteração de `receivables`, `settlements`, `assignors`; dump de carteira e documentos de cedente; UPDATE em massa de status; DROP se a role permitir. Além de fraude, é vazamento de dados de cedente (LGPD / confiança da mesa).
 
-**Correção neste repo.** Todo SQL em `JdbcReceivableRepository` e `JdbcSettlementRepository` é parametrizado (`:id`, `:receivableId`, …) via `JdbcClient`. Comentário no repositório de recebível deixa explícito: concatenar id em string é “SQL injection com autenticação de graça”. Colunas listadas no SELECT — sem `SELECT *` com mapeamento implícito por posição.
+**Correção neste repo.** Todo SQL/JPQL em `JpaReceivableRepository` e `JpaSettlementRepository` é parametrizado (`:id`, `:receivableId`, …) via Spring Data JPA / `@Query`. Colunas e propriedades são explicitamente mapeadas nas entidades JPA.
 
 ### B4. Unidade das taxas: `BASE_RATE = 1.0` e `spread = 1.5` / `2.5`
 
@@ -67,7 +67,7 @@
 - Taxa velha: paga com PTAX de três dias atrás em dia de volatilidade.
 - Sem taxa no registro: liquidação **irreproduzível** — contestação de cedente sem defesa.
 
-**Correção neste repo.** `FxRate` carrega `baseCurrency`, `quoteCurrency`, `rate`, `effectiveAt`, `source`; `convert()` escolhe dividir ou multiplicar pela direção explícita do par. `StoredFxRateProvider.rateFor` pede cotação vigente em `at` e rejeita defasagem acima de `maxStaleness` com `FxRateUnavailableException` (503, nunca fallback). `SettlementService` resolve a cotação **uma vez**, passa em `PricingInput.crossCurrency` e `Settlement` / `JdbcSettlementRepository` **copiam** par, valor, vigência e fonte para a linha de auditoria. CHECK `ck_settlements_fx_required_when_cross_currency` no schema impede cross-currency sem cotação.
+**Correção neste repo.** `FxRate` carrega `baseCurrency`, `quoteCurrency`, `rate`, `effectiveAt`, `source`; `convert()` escolhe dividir ou multiplicar pela direção explícita do par. `StoredFxRateProvider.rateFor` pede cotação vigente em `at` e rejeita defasagem acima de `maxStaleness` com `FxRateUnavailableException` (503, nunca fallback). `SettlementService` resolve a cotação **uma vez**, passa em `PricingInput.crossCurrency` e `Settlement` / `JpaSettlementRepository` **copiam** par, valor, vigência e fonte para a linha de auditoria. CHECK `ck_settlements_fx_required_when_cross_currency` no schema impede cross-currency sem cotação.
 
 ### C3. `res.status(200)` sempre — inclusive em falha
 
@@ -111,7 +111,7 @@
 
 **Impacto.** Precificação com campo trocado (face vs outra numérica) — pagamento sistematicamente errado até alguém notar no lote.
 
-**Correção.** `JdbcReceivableRepository` projeta colunas nomeadas e monta `Receivable`/`Money` explicitamente. Idem settlements.
+**Correção.** `JpaReceivableRepository` projeta colunas nomeadas e monta `Receivable`/`Money` explicitamente via entidades JPA. Idem settlements.
 
 ### M4. Settlement sem rastro de auditoria financeira
 
@@ -119,7 +119,7 @@
 
 **Impacto.** Impossível reproduzir o cálculo na contestação; impossível reconciliar mesa × contabilidade; estorno vira achismo.
 
-**Correção.** Tabela `settlements` em `V1__initial_schema.sql` e `JdbcSettlementRepository.INSERT` persistem o pacote completo. Trigger `trg_settlements_immutable` rejeita UPDATE/DELETE — correção é estorno, não reescrever história.
+**Correção.** Tabela `settlements` em `V1__initial_schema.sql` e `JpaSettlementRepository` persistem o pacote completo. Trigger `trg_settlements_immutable` rejeita UPDATE/DELETE — correção é estorno, não reescrever história.
 
 ### M5. Ausência de log, métrica e autorização
 

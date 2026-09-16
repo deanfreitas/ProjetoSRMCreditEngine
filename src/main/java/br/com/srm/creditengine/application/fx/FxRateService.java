@@ -7,7 +7,7 @@ import br.com.srm.creditengine.domain.fx.FxRateRepository;
 import br.com.srm.creditengine.domain.money.Currency;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,7 +55,7 @@ public class FxRateService {
             log.info("Cotacao registrada: pair={}/{} rate={} effectiveAt={} source={}",
                     saved.baseCurrency(), saved.quoteCurrency(), saved.rate(), saved.effectiveAt(), saved.source());
             return saved;
-        } catch (DuplicateKeyException e) {
+        } catch (DataIntegrityViolationException e) {
             throw new FxRateAlreadyRegisteredException(
                     command.baseCurrency(), command.quoteCurrency(), effectiveAt);
         }
